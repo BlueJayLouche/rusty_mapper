@@ -1,0 +1,22 @@
+audio_enabled = true
+ndi_input_enabled = true
+ndi_output_enabled = true
+
+[output_window]
+width = 1280
+height = 720
+title = "Rusty Mapper Output"
+fullscreen = false
+resizable = true
+decorated = true
+vsync = true
+fps = 60
+
+[control_window]
+width = 400
+height = 600
+title = "Rusty Mapper Control"
+
+[resolution]
+internal_width = 1920
+internal_height = 1080

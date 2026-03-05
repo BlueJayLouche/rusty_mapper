@@ -1,0 +1,349 @@
+# Rusty Mapper - Design Document
+
+## Overview
+
+A high-performance Rust video application for projection mapping with NDI input/output, dual-window architecture (preview/control + fullscreen output), and GPU-accelerated rendering via wgpu.
+
+## Goals
+
+- **High Performance**: 60fps+ rendering with minimal latency
+- **Dual Window Architecture**: Control window for UI, fullscreen output window with hidden cursor
+- **NDI Integration**: Both input (receive) and output (send) with dedicated threads
+- **Cross-Platform**: macOS primary, with Linux/Windows support potential
+- **Projection Mapping Ready**: Fullscreen output, cursor hiding, configurable resolutions
+
+---
+
+## Architecture
+
+### High-Level Structure
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           RUSTY MAPPER                                       │
+│                                                                              │
+│  ┌─────────────────────┐      ┌─────────────────────────────────────────┐   │
+│  │   CONTROL WINDOW    │      │          OUTPUT WINDOW                   │   │
+│  │  (imgui + preview)  │      │      (Fullscreen, No Cursor)             │   │
+│  │                     │      │                                          │   │
+│  │  ┌───────────────┐  │      │  ┌────────────────────────────────────┐  │   │
+│  │  │ NDI Source    │  │      │  │       RENDER PIPELINE               │  │   │
+│  │  │ Selector      │  │      │  │  ┌──────────┐ ┌──────────┐         │  │   │
+│  │  ├───────────────┤  │      │  │  │  Input   │ │ Effects │         │  │   │
+│  │  │ Preview       │  │◄─────┼──┼──┤ Processor│ │  Stage  │         │  │   │
+│  │  │ (320x180)     │  │      │  │  └────┬─────┘ └────┬─────┘         │  │   │
+│  │  ├───────────────┤  │      │  │       └────────────┘                │  │   │
+│  │  │ Output Ctrl   │  │      │  │            ↓                        │  │   │
+│  │  │ (NDI/Window)  │  │      │  │  ┌──────────────────────┐           │  │   │
+│  │  └───────────────┘  │      │  │  │    Output Mixer      │           │  │   │
+│  │                     │      │  │  │  (Projection Mapped) │           │  │   │
+│  │  ┌───────────────┐  │      │  │  └──────────┬───────────┘           │  │   │
+│  │  │ Parameters    │  │      │  │             ↓                       │  │   │
+│  │  │ (Real-time)   │◄─┼──────┼──┼─────────────┘                       │  │   │
+│  │  └───────────────┘  │      │  └────────────────────────────────────┘  │   │
+│  └─────────────────────┘      └─────────────────────────────────────────┘   │
+│           ▲                              │                                  │
+│           │                              │                                  │
+│           │         ┌────────────────────┴────────────────┐                 │
+│           │         │           SHARED STATE               │                 │
+│           │         │  (Parameters, Audio, NDI Sources)    │                 │
+│           │         └───────────────────────────────────────┘                 │
+│           │                                                                   │
+│  ┌────────┴─────────────────────────┐     ┌──────────────────────────────┐  │
+│  │      NDI INPUT THREAD            │     │    NDI OUTPUT THREAD         │  │
+│  │  ┌────────────┐  ┌─────────────┐ │     │  ┌────────────────────────┐  │  │
+│  │  │ Receiver   │──│ Frame Queue │ │     │  │   Frame Queue (2)      │  │  │
+│  │  │ (BGRA→RGBA)│  │ (latest-only)│     │  │                        │  │  │
+│  │  └────────────┘  └──────┬──────┘ │     │  │  ┌──────────┐ ┌──────┐ │  │  │
+│  │                         │        │     │  │  │ Sender   │ │ NDI  │ │  │  │
+│  └─────────────────────────┘        │     │  │  │ (RGBA→   │ │ Send │ │  │  │
+│                                     │     │  │  │  BGRA)   │ │      │ │  │  │
+│                                     │     │  │  └──────────┘ └──────┘ │  │  │
+│                                     │     │  └────────────────────────┘  │  │
+│                                     │     └──────────────────────────────┘  │
+│                                     │                                        │
+│  ┌─────────────────────────────────┴──────────────┐                         │
+│  │              AUDIO INPUT                         │                         │
+│  │  ┌────────────┐  ┌─────────────┐  ┌──────────┐ │                         │
+│  │  │ cpal Input │──│ FFT (8-band)│──│ Shared   │─┘                         │
+│  │  └────────────┘  └─────────────┘  │   State  │                            │
+│  └───────────────────────────────────┴──────────┘                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Modules
+
+### 1. Core Module (`src/core/`)
+- **SharedState**: Thread-safe state shared between windows and threads
+- **Parameters**: Real-time adjustable parameters (LFOs, audio modulation)
+- **Vertex**: GPU vertex definitions for quad rendering
+
+### 2. Windowing (`src/app.rs` + `winit`)
+Dual-window application handler implementing `winit::application::ApplicationHandler`:
+- **Output Window**: Fullscreen-capable, cursor hidden, wgpu surface
+- **Control Window**: ImGui-based UI, resizable, decorated
+
+### 3. NDI Input (`src/ndi/input.rs`)
+Based on rustjay_waaaves patterns:
+- **NdiSourceFinder**: Network discovery of NDI sources
+- **NdiReceiver**: Background thread receiver with BGRA→RGBA conversion
+- **Bounded channel** with latest-frame-only semantics (drops old frames)
+- Thread-safe frame queue using `crossbeam::channel`
+
+### 4. NDI Output (`src/ndi/output.rs`)
+Dedicated sender thread pattern from rustjay_waaaves:
+- **NdiOutputSender**: Background thread sender with RGBA→BGRA/BGRX conversion
+- **Bounded channel** (capacity=2) - drops frames if consumer is slow
+- **Cloneable handle**: Non-owning clones can submit frames
+- Thread persists via `Box::leak` pattern
+
+### 5. Rendering Engine (`src/engine/`)
+GPU-accelerated pipeline using wgpu:
+- **TextureManager**: Input texture management and updates
+- **RenderPipeline**: Shader-based video processing
+- **Blit Pipeline**: Final output to surface
+
+### 6. GUI (`src/gui/`)
+ImGui-based control interface:
+- **ControlGui**: Parameter controls, NDI source selection
+- **Preview**: Real-time output preview (via shared texture)
+
+### 7. Audio (`src/audio/`)
+Optional audio analysis:
+- **AudioInput**: cpal-based audio capture
+- **FFT**: 8-band frequency analysis
+- **Beat Detection**: BPM and phase tracking
+
+---
+
+## Thread Architecture
+
+```
+MAIN THREAD (Event Loop)
+├── Polls window events
+├── Updates shared state
+├── Submits GPU commands
+└── Requests redraws
+
+NDI INPUT THREAD (Per Source)
+├── Finds NDI source
+├── Receives video frames
+├── Converts BGRA → RGBA
+└── Sends to bounded queue
+
+NDI OUTPUT THREAD (Singleton)
+├── Receives frames from queue
+├── Converts RGBA → BGRA/BGRX
+├── Sends via NDI SDK
+└── Logs stats periodically (30s)
+
+AUDIO THREAD (cpal callback)
+├── Captures audio samples
+├── Performs FFT analysis
+└── Updates shared audio state
+```
+
+---
+
+## Data Flow
+
+### Input Flow (Webcam/NDI/OBS)
+```
+Webcam:  Camera → MJPEG/YUYV → RGBA Conversion → Frame Queue → GPU Upload → Shader
+NDI:     Network → NDI SDK → Receiver Thread → BGRA→RGBA → Frame Queue → GPU Upload → Shader
+OBS:     OBS NDI Output → Same as NDI above
+```
+
+### NDI Output Flow
+```
+Shader Output → GPU Readback → RGBA→BGRA Conversion → Frame Queue → Sender Thread → NDI SDK → Network
+```
+
+---
+
+## Key Design Decisions
+
+### 1. Dedicated NDI Output Thread
+Following rustjay_waaaves pattern:
+- **Why**: NDI SDK send operations can block; moving off main thread prevents frame drops
+- **How**: Thread owns NDI `Sender`, receives frames via channel, uses `Box::leak` to persist
+- **Benefit**: Render loop never blocks on network I/O
+
+### 2. Multi-Input Support
+- **Input Types**: Webcam (via nokhwa), NDI (Network Device Interface), OBS (via NDI output)
+- **Independent Mapping**: Each input can be selected independently with its own configuration
+- **Hot Swappable**: Change inputs on the fly without restarting the application
+- **Refreshable Lists**: Device lists are cached but can be refreshed to detect new sources
+
+### 3. Bounded Frame Queues
+- **Input Queue**: Capacity 5, drops oldest when full (latest-frame semantics)
+- **Output Queue**: Capacity 2, drops when full (low-latency over reliability)
+- **Why**: Prevents memory growth under load, prioritizes fresh frames
+
+### 3. Dual Window with Shared GPU Context
+- Single `wgpu::Instance`, shared `Device` and `Queue`
+- Output window owns surface, control window shares resources
+- ImGui renderer uses same device/queue for UI rendering
+
+### 4. Cursor Hiding on Output Window
+```rust
+// Default hidden
+window.set_cursor_visible(false);
+
+// Show when cursor leaves, hide when enters
+WindowEvent::CursorEntered { .. } => window.set_cursor_visible(false),
+WindowEvent::CursorLeft { .. } => window.set_cursor_visible(true),
+```
+
+### 5. Fullscreen Toggle
+```rust
+fn toggle_fullscreen(&mut self) {
+    let fullscreen_mode = if self.output_fullscreen {
+        Some(winit::window::Fullscreen::Borderless(None))
+    } else {
+        None
+    };
+    output_window.set_fullscreen(fullscreen_mode);
+}
+```
+
+---
+
+## File Structure
+
+```
+ rusty_mapper/
+├── Cargo.toml
+├── DESIGN.md                 # This document
+├── src/
+│   ├── main.rs              # Entry point, event loop
+│   ├── app.rs               # Application handler (dual window)
+│   ├── config.rs            # Configuration loading
+│   ├── core/
+│   │   ├── mod.rs           # Core module exports
+│   │   ├── state.rs         # SharedState definition
+│   │   └── vertex.rs        # GPU vertex types
+│   ├── input/               # Input management (NEW)
+│   │   ├── mod.rs           # InputManager, InputSource
+│   │   ├── ndi.rs           # NDI receiver
+│   │   └── webcam.rs        # Webcam capture (optional)
+│   ├── ndi/
+│   │   ├── mod.rs           # NDI module exports
+│   │   └── output.rs        # NdiOutputSender (output thread)
+│   ├── engine/
+│   │   ├── mod.rs           # Engine exports
+│   │   ├── renderer.rs      # Main wgpu renderer
+│   │   ├── texture.rs       # Texture utilities
+│   │   └── shaders/
+│   │       └── main.wgsl    # Main shader
+│   ├── gui/
+│   │   ├── mod.rs           # GUI exports
+│   │   ├── gui.rs           # ImGui setup with input selection
+│   │   └── renderer.rs      # ImGui wgpu renderer
+│   └── audio/
+│       ├── mod.rs           # Audio exports
+│       └── input.rs         # Audio capture + FFT
+└── config.toml              # Runtime configuration
+```
+
+---
+
+## Dependencies
+
+```toml
+[dependencies]
+# Windowing & Graphics
+winit = "0.30"
+wgpu = "25.0"
+pollster = "0.3"
+
+# Math
+glam = { version = "0.29", features = ["bytemuck"] }
+bytemuck = { version = "1.21", features = ["derive"] }
+
+# NDI
+grafton-ndi = "0.11"
+
+# Threading
+crossbeam = "0.8"
+
+# Audio
+cpal = "0.15"
+rustfft = "6.2"
+
+# GUI
+imgui = "0.12"
+imgui-wgpu = "0.25"
+imgui-winit-support = "0.13"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error Handling
+anyhow = "1.0"
+thiserror = "2.0"
+```
+
+---
+
+## Performance Considerations
+
+1. **GPU Upload**: Use `write_texture` for CPU→GPU transfers
+2. **Readback**: Triple-buffered GPU→CPU for NDI output (async)
+3. **VSync**: Configurable (on for output, off for control)
+4. **Frame Skip**: NDI output can skip frames to maintain render FPS
+
+---
+
+## Input Device Selection
+
+The GUI provides a device selector window with tabs for different input types:
+
+### Webcam Tab
+- Lists available webcam devices (0-3, auto-detected)
+- Select any detected camera for Input 1 or Input 2
+- Uses nokhwa library with MJPEG decoding
+
+### NDI Tab
+- Lists NDI sources on the network (non-OBS)
+- Auto-refreshes on window open
+- Manual refresh button available
+
+### OBS Tab
+- Shows NDI sources with "OBS" in the name
+- Requires OBS NDI plugin installed and active
+- Direct selection for streaming output
+
+### Device Refresh
+- Menu: Devices → Refresh All
+- Detects newly connected sources
+- Updates cached device lists
+
+## Feature Flags
+
+### Webcam Support
+Enabled by default. Disable with:
+```bash
+cargo build --no-default-features
+```
+
+Useful when:
+- libclang is not available
+- Webcam support is not needed
+- Building for headless deployment
+
+## Future Extensions
+
+1. **Syphon/Spout**: macOS/Windows GPU texture sharing
+2. **MIDI/OSC**: External controller support
+3. **Recording**: GPU-accelerated video recording
+4. **Multi-output**: Multiple NDI outputs, different resolutions
+5. **Projection Mapping**: Mesh warping for geometry correction
+6. **More Input Types**: SDI capture cards, Blackmagic devices
