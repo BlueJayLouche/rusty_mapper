@@ -23,6 +23,7 @@ mod engine;
 mod gui;
 mod input;
 mod ndi;
+mod output;
 
 use config::AppConfig;
 use core::SharedState;

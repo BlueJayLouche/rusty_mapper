@@ -5,6 +5,7 @@
 use crate::config::AppConfig;
 use crate::core::{SharedState, Vertex, InputMapping};
 use crate::engine::texture::{Texture, InputTextureManager};
+use crate::output::OutputManager;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -77,12 +78,10 @@ pub struct WgpuEngine {
     // Frame counter
     frame_count: u64,
     
-    // NDI output
-    ndi_sender: Option<crate::ndi::NdiOutputSender>,
-    ndi_frame_skip: u8,
-    ndi_skip_counter: u8,
+    // Output manager (NDI, Syphon, etc.)
+    output_manager: OutputManager,
     
-    // GPU readback buffers for NDI
+    // GPU readback buffers for output
     readback_buffers: Vec<wgpu::Buffer>,
     current_readback_buffer: usize,
     
@@ -349,8 +348,8 @@ impl WgpuEngine {
         Ok(Self {
             instance: instance.clone(),
             adapter,
-            device,
-            queue,
+            device: Arc::clone(&device),
+            queue: Arc::clone(&queue),
             surface,
             config,
             window_width: size.width,
@@ -364,9 +363,7 @@ impl WgpuEngine {
             input_texture_manager,
             vertex_buffer,
             frame_count: 0,
-            ndi_sender: None,
-            ndi_frame_skip: 0,
-            ndi_skip_counter: 0,
+            output_manager: OutputManager::new(),
             readback_buffers,
             current_readback_buffer: 0,
             uniform_bind_group_layout,
@@ -409,33 +406,42 @@ impl WgpuEngine {
     }
     
     /// Start NDI output
-    pub fn start_ndi_output(&mut self, name: &str, include_alpha: bool, frame_skip: u8) -> anyhow::Result<()> {
-        if self.ndi_sender.is_some() {
-            return Err(anyhow::anyhow!("NDI output already active"));
-        }
-        
-        let sender = crate::ndi::NdiOutputSender::new(
+    pub fn start_ndi_output(&mut self, name: &str, include_alpha: bool, _frame_skip: u8) -> anyhow::Result<()> {
+        self.output_manager.start_ndi(
             name,
             self.render_target.width,
             self.render_target.height,
-            include_alpha,
+            include_alpha
         )?;
-        
-        self.ndi_sender = Some(sender);
-        self.ndi_frame_skip = frame_skip;
-        self.ndi_skip_counter = 0;
-        
-        log::info!("NDI output started: '{}' ({}x{}, alpha={}, skip={})",
-            name, self.render_target.width, self.render_target.height, include_alpha, frame_skip);
-        
         Ok(())
     }
     
     /// Stop NDI output
     pub fn stop_ndi_output(&mut self) {
-        if self.ndi_sender.take().is_some() {
-            log::info!("NDI output stopped");
-        }
+        self.output_manager.stop_ndi();
+    }
+    
+    /// Start Syphon output (macOS only)
+    #[cfg(target_os = "macos")]
+    pub fn start_syphon_output(&mut self, server_name: &str) -> anyhow::Result<()> {
+        self.output_manager.start_syphon(
+            server_name,
+            Arc::clone(&self.device),
+            Arc::clone(&self.queue)
+        )?;
+        Ok(())
+    }
+    
+    /// Stop Syphon output (macOS only)
+    #[cfg(target_os = "macos")]
+    pub fn stop_syphon_output(&mut self) {
+        self.output_manager.stop_syphon();
+    }
+    
+    /// Check if Syphon is active (macOS only)
+    #[cfg(target_os = "macos")]
+    pub fn is_syphon_active(&self) -> bool {
+        self.output_manager.is_syphon_active()
     }
     
     /// Render a frame
@@ -574,26 +580,15 @@ impl WgpuEngine {
         // Blit render target to surface
         self.blit_to_surface(&mut encoder, &surface_view, &self.render_target.view);
         
-        // Handle NDI output
-        if self.ndi_sender.is_some() {
-            self.ndi_skip_counter = self.ndi_skip_counter.wrapping_add(1);
-            let should_send = self.ndi_skip_counter % (self.ndi_frame_skip + 1) == 0;
-            
-            if should_send {
-                self.copy_for_ndi(&mut encoder);
-            }
-        }
-        
-        // Submit commands
+        // Submit commands to GPU
         self.queue.submit(std::iter::once(encoder.finish()));
         
         // Present surface
         surface_texture.present();
         
-        // Process NDI readback if active
-        if self.ndi_sender.is_some() {
-            self.process_ndi_readback();
-        }
+        // Submit frame to all active outputs (Syphon, NDI, etc.)
+        // Note: This uses the render_target texture which contains the final output
+        self.output_manager.submit_frame(&self.render_target.texture, &self.queue);
         
         self.frame_count += 1;
     }

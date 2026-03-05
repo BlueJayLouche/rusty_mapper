@@ -49,6 +49,15 @@ pub struct NdiOutputState {
     pub frame_skip: u8,
 }
 
+/// Syphon output state (macOS only)
+#[derive(Debug, Clone, Default)]
+pub struct SyphonOutputState {
+    /// Server name displayed to clients
+    pub server_name: String,
+    /// Whether output is enabled
+    pub enabled: bool,
+}
+
 /// Audio analysis state
 #[derive(Debug, Clone, Default)]
 pub struct AudioState {
@@ -174,6 +183,9 @@ pub struct SharedState {
     pub ndi_output: NdiOutputState,
     pub ndi_output_command: NdiOutputCommand,
     
+    // Syphon Output (macOS)
+    pub syphon_output: SyphonOutputState,
+    
     // Audio
     pub audio: AudioState,
     
@@ -234,6 +246,11 @@ impl SharedState {
                 frame_skip: 0,
             },
             ndi_output_command: NdiOutputCommand::None,
+            
+            syphon_output: SyphonOutputState {
+                server_name: "RustyMapper".to_string(),
+                enabled: false,
+            },
             
             audio: AudioState {
                 fft: [0.0; 8],

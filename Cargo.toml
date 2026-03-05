@@ -60,6 +60,17 @@ imgui = "0.12"
 imgui-wgpu = "0.25"
 imgui-winit-support = "0.13"
 
+# OpenCV for video wall calibration (optional feature)
+opencv = { version = "0.92", default-features = false, features = ["aruco", "imgproc", "videoio"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Syphon (macOS GPU texture sharing)
+metal = "0.29"
+cocoa = "0.25"
+objc = "0.2"
+core-foundation = "0.10"
+core-graphics = "0.24"
+
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -69,6 +80,7 @@ panic = "abort"
 [features]
 default = ["webcam"]
 webcam = ["nokhwa"]
+opencv = ["dep:opencv"]
 
 [profile.dev]
 opt-level = 1

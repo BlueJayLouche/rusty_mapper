@@ -45,6 +45,7 @@ pub struct ControlGui {
     
     // Output
     ndi_output_name: String,
+    syphon_server_name: String,
     
     // Mapping edit state (local copy to reduce lock contention)
     mapping_edit_input1: InputMapping,
@@ -54,10 +55,11 @@ pub struct ControlGui {
 
 impl ControlGui {
     pub fn new(_config: &AppConfig, shared_state: Arc<Mutex<SharedState>>) -> anyhow::Result<Self> {
-        let (ndi_output_name, mapping1, mapping2) = {
+        let (ndi_output_name, syphon_server_name, mapping1, mapping2) = {
             let state = shared_state.lock().unwrap();
             (
                 state.ndi_output.stream_name.clone(),
+                state.syphon_output.server_name.clone(),
                 state.input1_mapping,
                 state.input2_mapping,
             )
@@ -76,6 +78,7 @@ impl ControlGui {
             selector_for_input: 1,
             mapping_tab_input: 0,
             ndi_output_name,
+            syphon_server_name,
             mapping_edit_input1: mapping1,
             mapping_edit_input2: mapping2,
             mapping_needs_update: false,
@@ -362,12 +365,12 @@ impl ControlGui {
         ui.input_text("Stream Name", &mut self.ndi_output_name)
             .build();
         
-        let is_active = {
+        let ndi_active = {
             let state = self.shared_state.lock().unwrap();
             state.ndi_output.is_active
         };
         
-        if !is_active {
+        if !ndi_active {
             if ui.button("Start NDI Output") {
                 let mut state = self.shared_state.lock().unwrap();
                 state.ndi_output.stream_name = self.ndi_output_name.clone();
@@ -378,6 +381,40 @@ impl ControlGui {
                 let mut state = self.shared_state.lock().unwrap();
                 state.ndi_output_command = NdiOutputCommand::Stop;
             }
+        }
+        
+        // Syphon Output section (macOS only)
+        #[cfg(target_os = "macos")]
+        {
+            ui.separator();
+            ui.text_colored([1.0, 0.5, 0.0, 1.0], "Syphon Output (macOS)");
+            ui.text_disabled("Share GPU texture with Resolume, MadMapper, etc.");
+            
+            // Syphon server name input
+            ui.input_text("Server Name", &mut self.syphon_server_name)
+                .build();
+            
+            // Check if syphon should be active from shared state
+            let syphon_requested = {
+                let state = self.shared_state.lock().unwrap();
+                state.syphon_output.enabled
+            };
+            
+            if !syphon_requested {
+                if ui.button("Start Syphon Output") {
+                    let mut state = self.shared_state.lock().unwrap();
+                    state.syphon_output.server_name = self.syphon_server_name.clone();
+                    state.syphon_output.enabled = true;
+                }
+            } else {
+                if ui.button("Stop Syphon Output") {
+                    let mut state = self.shared_state.lock().unwrap();
+                    state.syphon_output.enabled = false;
+                }
+            }
+            
+            ui.text(format!("Status: {}", 
+                if syphon_requested { "Active" } else { "Inactive" }));
         }
         
         // Status
