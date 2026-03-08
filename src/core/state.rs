@@ -2,6 +2,7 @@
 //!
 //! Thread-safe state shared between windows, threads, and the render loop.
 
+use crate::videowall::{VideoWallConfig, CalibrationController};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -207,6 +208,16 @@ pub struct SharedState {
     
     // Mix parameters
     pub mix_amount: f32,  // 0 = input1 only, 1 = input2 only, 0.5 = equal mix
+    
+    // Video wall calibration
+    pub videowall_calibration: Option<CalibrationController>,
+    pub videowall_config: Option<VideoWallConfig>,
+    pub videowall_enabled: bool,
+    
+    // Manual corner adjustment mode
+    pub videowall_edit_mode: bool,
+    pub videowall_edit_display: Option<u32>,  // Which display is being edited
+    pub videowall_edit_corner: Option<usize>, // Which corner (0-3) is being dragged
 }
 
 impl SharedState {
@@ -276,6 +287,13 @@ impl SharedState {
             input2_mapping: InputMapping::default(),
             
             mix_amount: 0.5,
+            
+            videowall_calibration: None,
+            videowall_config: None,
+            videowall_enabled: false,
+            videowall_edit_mode: false,
+            videowall_edit_display: None,
+            videowall_edit_corner: None,
         }
     }
     

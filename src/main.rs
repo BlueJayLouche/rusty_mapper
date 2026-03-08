@@ -24,6 +24,7 @@ mod gui;
 mod input;
 mod ndi;
 mod output;
+mod videowall;
 
 use config::AppConfig;
 use core::SharedState;

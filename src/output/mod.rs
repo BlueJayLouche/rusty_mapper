@@ -98,7 +98,7 @@ impl OutputManager {
     }
     
     /// Submit frame to all active outputs
-    pub fn submit_frame(&mut self, texture: &wgpu::Texture, queue: &wgpu::Queue) {
+    pub fn submit_frame(&mut self, texture: &wgpu::Texture, device: &wgpu::Device, queue: &wgpu::Queue) {
         self.frame_count += 1;
         
         // NDI output (runs on separate thread)
@@ -110,7 +110,7 @@ impl OutputManager {
         // Syphon output (macOS only, zero copy)
         #[cfg(target_os = "macos")]
         if let Some(syphon) = &mut self.syphon_output {
-            if let Err(e) = syphon.submit_frame(texture, queue) {
+            if let Err(e) = syphon.submit_frame(texture, device, queue) {
                 log::error!("Syphon output error: {}", e);
             }
         }

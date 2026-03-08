@@ -588,7 +588,7 @@ impl WgpuEngine {
         
         // Submit frame to all active outputs (Syphon, NDI, etc.)
         // Note: This uses the render_target texture which contains the final output
-        self.output_manager.submit_frame(&self.render_target.texture, &self.queue);
+        self.output_manager.submit_frame(&self.render_target.texture, &self.device, &self.queue);
         
         self.frame_count += 1;
     }
@@ -754,5 +754,17 @@ impl WgpuEngine {
         // In a full implementation, we'd map the buffer and send to NDI
         // For now, this is a placeholder
         // The async approach from rustjay_waaaves is more sophisticated
+    }
+    
+    /// Upload calibration pattern for video wall calibration
+    /// This displays the ArUco marker pattern on the output window
+    pub fn upload_calibration_pattern(&mut self, rgba_data: &[u8], width: u32, height: u32) {
+        // Ensure input1 texture exists at the right size
+        self.input_texture_manager.ensure_input1(width, height);
+        
+        // Upload the pattern data
+        self.input_texture_manager.update_input1(rgba_data, width, height);
+        
+        log::debug!("Uploaded calibration pattern: {}x{}", width, height);
     }
 }

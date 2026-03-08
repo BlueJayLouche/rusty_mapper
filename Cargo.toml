@@ -54,6 +54,8 @@ anyhow = "1.0"
 
 # Time and scheduling
 instant = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
 
 # GUI - imgui for wgpu
 imgui = "0.12"
@@ -65,6 +67,8 @@ opencv = { version = "0.92", default-features = false, features = ["aruco", "img
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Syphon (macOS GPU texture sharing)
+syphon-core = { path = "../crates/syphon/syphon-core" }
+syphon-wgpu = { path = "../crates/syphon/syphon-wgpu" }
 metal = "0.29"
 cocoa = "0.25"
 objc = "0.2"

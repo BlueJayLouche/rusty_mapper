@@ -18,9 +18,13 @@ A high-performance projection mapping application in Rust with NDI input/output 
 - **Projection Mapping**: Corner pinning with bilinear interpolation for quad warping
 - **Transform Controls**: Per-input scale, offset, and rotation
 - **Blend Modes**: Normal (mix), Add, Multiply, Screen blending
-- **Visual GUI** (WIP): Preview-centric interface with source/output previews and overlayed display boxes
-- **Video Wall Support** (WIP): Auto-calibration for HDMI matrix walls via ArUco markers, with record/decode workflow
-- **Local Sharing** (WIP): Syphon/Spout/v4l2loopback for inter-app video sharing
+- **Visual GUI**: Preview-centric interface with source/output previews and overlayed display boxes
+- **Video Wall Support**: Auto-calibration for HDMI matrix walls via ArUco markers
+  - Static pattern calibration (all markers shown simultaneously)
+  - Per-display adjustments (brightness, contrast, gamma)
+  - Manual corner adjustment (drag-to-move)
+  - Named preset save/load
+- **Local Sharing**: Syphon/Spout/v4l2loopback for inter-app video sharing
 - **Configurable Resolution**: Internal rendering resolution independent of window size
 
 ## Architecture

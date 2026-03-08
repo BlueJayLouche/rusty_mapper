@@ -4,6 +4,7 @@
 //! - Webcam capture (via nokhwa)
 //! - NDI input (Network Device Interface)
 //! - OBS (via NDI)
+//! - Syphon (macOS only)
 //!
 //! Each input is independently selectable and refreshable.
 
@@ -19,6 +20,12 @@ pub use ndi::{NdiReceiver, NdiFrame, list_ndi_sources, is_ndi_available};
 pub mod webcam;
 #[cfg(feature = "webcam")]
 pub use webcam::{WebcamCapture, WebcamFrame, list_cameras};
+
+// Syphon input support (macOS only)
+#[cfg(target_os = "macos")]
+pub mod syphon_input;
+#[cfg(target_os = "macos")]
+pub use syphon_input::{SyphonInputReceiver, SyphonDiscovery, SyphonInputIntegration, SyphonServerInfo};
 
 // Placeholder types when webcam is disabled
 #[cfg(not(feature = "webcam"))]
@@ -59,6 +66,8 @@ pub enum InputType {
     Webcam,
     Ndi,
     Obs,  // OBS via NDI
+    #[cfg(target_os = "macos")]
+    Syphon,
 }
 
 impl InputType {
@@ -69,6 +78,8 @@ impl InputType {
             InputType::Webcam => "Webcam",
             InputType::Ndi => "NDI",
             InputType::Obs => "OBS (NDI)",
+            #[cfg(target_os = "macos")]
+            InputType::Syphon => "Syphon",
         }
     }
 }
@@ -99,6 +110,10 @@ pub struct InputSource {
     frame_receiver: Option<mpsc::Receiver<WebcamFrame>>,
     ndi_receiver: Option<NdiReceiver>,
     
+    // Syphon receiver (macOS only)
+    #[cfg(target_os = "macos")]
+    syphon_receiver: Option<SyphonInputReceiver>,
+    
     // Current frame data
     current_frame: Option<Vec<u8>>,
 }
@@ -115,6 +130,8 @@ impl InputSource {
             webcam: None,
             frame_receiver: None,
             ndi_receiver: None,
+            #[cfg(target_os = "macos")]
+            syphon_receiver: None,
             current_frame: None,
         }
     }
@@ -171,6 +188,31 @@ impl InputSource {
         Ok(())
     }
     
+    /// Start Syphon receiver (macOS only)
+    #[cfg(target_os = "macos")]
+    pub fn start_syphon(&mut self, server_name: impl Into<String>) -> Result<()> {
+        self.stop();
+        
+        let server_name = server_name.into();
+        let mut receiver = SyphonInputReceiver::new();
+        receiver.connect(&server_name)?;
+        
+        self.input_type = InputType::Syphon;
+        self.source_name = server_name.clone();
+        self.active = true;
+        self.syphon_receiver = Some(receiver);
+        
+        log::info!("Started Syphon input: {}", server_name);
+        
+        Ok(())
+    }
+    
+    /// Start Syphon (stub on non-macOS)
+    #[cfg(not(target_os = "macos"))]
+    pub fn start_syphon(&mut self, _server_name: impl Into<String>) -> Result<()> {
+        Err(anyhow::anyhow!("Syphon is only available on macOS"))
+    }
+    
     /// Stop the input source
     pub fn stop(&mut self) {
         if !self.active {
@@ -191,6 +233,12 @@ impl InputSource {
         // Stop NDI
         if let Some(mut ndi) = self.ndi_receiver.take() {
             ndi.stop();
+        }
+        
+        // Stop Syphon
+        #[cfg(target_os = "macos")]
+        {
+            self.syphon_receiver = None;
         }
         
         self.frame_receiver = None;
@@ -230,6 +278,16 @@ impl InputSource {
                 self.has_new_frame = true;
             }
         }
+        
+        // Handle Syphon frames
+        #[cfg(target_os = "macos")]
+        if let Some(ref mut syphon) = self.syphon_receiver {
+            if let Some(frame) = syphon.try_receive() {
+                self.resolution = (frame.width, frame.height);
+                self.current_frame = Some(frame.data);
+                self.has_new_frame = true;
+            }
+        }
     }
     
     /// Check if there's a new frame
@@ -264,6 +322,8 @@ impl InputSource {
             InputType::None => "None".to_string(),
             InputType::Webcam => format!("Webcam {}", self.device_index),
             InputType::Ndi | InputType::Obs => self.source_name.clone(),
+            #[cfg(target_os = "macos")]
+            InputType::Syphon => self.source_name.clone(),
         }
     }
 }
@@ -392,6 +452,16 @@ impl InputManager {
     /// Start OBS on input 2
     pub fn start_input2_obs(&mut self, source_name: impl Into<String>) -> Result<()> {
         self.input2.start_obs(source_name)
+    }
+    
+    /// Start Syphon on input 1
+    pub fn start_input1_syphon(&mut self, server_name: impl Into<String>) -> Result<()> {
+        self.input1.start_syphon(server_name)
+    }
+    
+    /// Start Syphon on input 2
+    pub fn start_input2_syphon(&mut self, server_name: impl Into<String>) -> Result<()> {
+        self.input2.start_syphon(server_name)
     }
     
     /// Stop input 1

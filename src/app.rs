@@ -13,6 +13,7 @@ use crate::engine::WgpuEngine;
 use crate::gui::{ControlGui, ImGuiRenderer};
 use crate::input::InputManager;
 use crate::ndi::NdiOutputSender;
+use crate::videowall::{CalibrationController, CalibrationStatus};
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -263,10 +264,28 @@ impl App {
             // Update input manager (poll for new frames)
             manager.update();
             
+            // Check if calibration is waiting for capture
+            let calibration_waiting = {
+                let state = self.shared_state.lock().unwrap();
+                state.videowall_calibration.as_ref()
+                    .map(|c| c.is_ready_for_capture())
+                    .unwrap_or(false)
+            };
+            
             // Upload input 1 frame if available
             if manager.input1.has_frame() {
                 if let Some(frame_data) = manager.input1.take_frame() {
                     let (width, height) = manager.input1.resolution();
+                    
+                    // If calibration is waiting, submit this frame
+                    if calibration_waiting {
+                        let mut state = self.shared_state.lock().unwrap();
+                        if let Some(ref mut calibration) = state.videowall_calibration {
+                            log::info!("Auto-submitting camera frame {}x{} for calibration", width, height);
+                            calibration.submit_frame(frame_data.clone(), width, height);
+                        }
+                    }
+                    
                     if let Some(ref mut engine) = self.output_engine {
                         engine.input_texture_manager.update_input1(&frame_data, width, height);
                     }
@@ -288,6 +307,60 @@ impl App {
                     let mut state = self.shared_state.lock().unwrap();
                     state.ndi_input2.width = width;
                     state.ndi_input2.height = height;
+                }
+            }
+        }
+    }
+    
+    /// Process video wall calibration updates
+    fn process_videowall_calibration(&mut self) {
+        // Check if calibration is active in shared state
+        let calibration_active = {
+            let mut state = self.shared_state.lock().unwrap();
+            if let Some(ref mut calibration) = state.videowall_calibration {
+                if calibration.is_active() {
+                    // Update calibration
+                    match calibration.update() {
+                        CalibrationStatus::InProgress | CalibrationStatus::ReadyForCapture | CalibrationStatus::Processing => {
+                            // Get current pattern and upload to output
+                            if let Some(pattern) = calibration.current_pattern() {
+                                // Upload pattern to GPU texture
+                                let (width, height) = (pattern.width(), pattern.height());
+                                let rgba_data: Vec<u8> = pattern.pixels()
+                                    .flat_map(|p| [p[0], p[1], p[2], p[3]])
+                                    .collect();
+                                
+                                if let Some(ref mut engine) = self.output_engine {
+                                    engine.upload_calibration_pattern(&rgba_data, width, height);
+                                }
+                            }
+                            true
+                        }
+                        CalibrationStatus::Complete(config) => {
+                            log::info!("Calibration complete! {} displays configured", config.displays.len());
+                            state.videowall_config = Some(config.clone());
+                            state.videowall_enabled = true;
+                            false
+                        }
+                        CalibrationStatus::Error(ref e) => {
+                            log::error!("Calibration error: {}", e);
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        
+        // Clear calibration if not active
+        if !calibration_active {
+            let mut state = self.shared_state.lock().unwrap();
+            if let Some(ref calibration) = state.videowall_calibration {
+                if !calibration.is_active() {
+                    state.videowall_calibration = None;
                 }
             }
         }
@@ -451,6 +524,46 @@ impl ApplicationHandler for App {
                             engine.render();
                         }
                     }
+                    // Mouse handling for corner adjustment
+                    WindowEvent::MouseInput { state: button_state, button, .. } => {
+                        if button == winit::event::MouseButton::Left {
+                            let mut shared_state = self.shared_state.lock().unwrap();
+                            if shared_state.videowall_edit_mode {
+                                if button_state == winit::event::ElementState::Pressed {
+                                    // Start dragging selected corner
+                                    // (Selection is done via GUI)
+                                } else {
+                                    // Release - stop dragging
+                                    shared_state.videowall_edit_corner = None;
+                                    shared_state.videowall_edit_display = None;
+                                }
+                            }
+                        }
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        let mut shared_state = self.shared_state.lock().unwrap();
+                        if shared_state.videowall_edit_mode {
+                            if let (Some(display_id), Some(corner_idx)) = 
+                                (shared_state.videowall_edit_display, shared_state.videowall_edit_corner) 
+                            {
+                                // Get window size for normalization
+                                if let Some(ref output_window) = self.output_window {
+                                    let window_size = output_window.inner_size();
+                                    let x = position.x as f32 / window_size.width as f32;
+                                    let y = position.y as f32 / window_size.height as f32;
+                                    
+                                    // Update the corner position
+                                    if let Some(ref mut config) = shared_state.videowall_config {
+                                        if let Some(display) = config.displays.iter_mut().find(|d| d.id == display_id) {
+                                            if corner_idx < 4 {
+                                                display.dest_quad[corner_idx] = [x, y];
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
                 return;
@@ -497,7 +610,6 @@ impl ApplicationHandler for App {
             }
         }
     }
-    
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         // Initialize input manager if needed (after engine is ready)
         if self.input_manager.is_none() {
@@ -510,6 +622,9 @@ impl ApplicationHandler for App {
         
         // Handle NDI output commands
         self.process_ndi_output_commands();
+        
+        // Update video wall calibration
+        self.process_videowall_calibration();
         
         // Update inputs and upload frames to GPU
         self.update_inputs();
