@@ -591,8 +591,43 @@ impl ControlGui {
         
         ui.same_line();
         if ui.button("Load from Photo") {
-            // In a real implementation, open file picker dialog
-            log::info!("Photo upload requested - would open file picker");
+            // Open file picker dialog
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tiff", "webp"])
+                .add_filter("All files", &["*"])
+                .set_title("Select calibration photo")
+                .pick_file() 
+            {
+                log::info!("Selected photo: {:?}", path);
+                
+                // Start calibration from photo
+                let grid_size = GridSize::new(
+                    self.videowall_grid_columns as u32,
+                    self.videowall_grid_rows as u32,
+                );
+                
+                let mut calibration = CalibrationController::new()
+                    .with_marker_config(crate::videowall::MarkerDisplayConfig {
+                        marker_size_percent: self.videowall_marker_size,
+                        margin_percent: (1.0 - self.videowall_marker_size) / 2.0,
+                    })
+                    .with_auto_detect(self.videowall_auto_detect);
+                
+                match calibration.start_from_photo(
+                    grid_size,
+                    &path,
+                    self.videowall_output_resolution,
+                ) {
+                    Ok(_) => {
+                        log::info!("Started photo calibration from {:?}", path);
+                        let mut state = self.shared_state.lock().unwrap();
+                        state.videowall_calibration = Some(calibration);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to start photo calibration: {}", e);
+                    }
+                }
+            }
         }
         
         // Configuration status

@@ -57,6 +57,9 @@ instant = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 
+# File dialogs
+rfd = "0.15"
+
 # GUI - imgui for wgpu
 imgui = "0.12"
 imgui-wgpu = "0.25"
