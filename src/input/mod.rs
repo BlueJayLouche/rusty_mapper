@@ -9,7 +9,7 @@
 //! Each input is independently selectable and refreshable.
 
 use anyhow::Result;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 // NDI input support
 pub mod ndi;
@@ -26,6 +26,10 @@ pub use webcam::{WebcamCapture, WebcamFrame, list_cameras};
 pub mod syphon_input;
 #[cfg(target_os = "macos")]
 pub use syphon_input::{SyphonInputReceiver, SyphonDiscovery, SyphonInputIntegration, SyphonServerInfo};
+
+// Re-export syphon-wgpu types for convenience
+#[cfg(target_os = "macos")]
+pub use syphon_wgpu::{SyphonWgpuInput, InputFormat as SyphonInputFormat};
 
 // Placeholder types when webcam is disabled
 #[cfg(not(feature = "webcam"))]
@@ -114,8 +118,18 @@ pub struct InputSource {
     #[cfg(target_os = "macos")]
     syphon_receiver: Option<SyphonInputReceiver>,
     
-    // Current frame data
+    // Current frame data (CPU fallback for webcam/NDI)
     current_frame: Option<Vec<u8>>,
+    
+    // wgpu resources for Syphon (stored for lazy initialization)
+    #[cfg(target_os = "macos")]
+    syphon_device: Option<Arc<wgpu::Device>>,
+    #[cfg(target_os = "macos")]
+    syphon_queue: Option<Arc<wgpu::Queue>>,
+    
+    // Latest Syphon texture (zero-copy path)
+    #[cfg(target_os = "macos")]
+    syphon_texture: Option<wgpu::Texture>,
 }
 
 impl InputSource {
@@ -133,6 +147,24 @@ impl InputSource {
             #[cfg(target_os = "macos")]
             syphon_receiver: None,
             current_frame: None,
+            #[cfg(target_os = "macos")]
+            syphon_device: None,
+            #[cfg(target_os = "macos")]
+            syphon_queue: None,
+            #[cfg(target_os = "macos")]
+            syphon_texture: None,
+        }
+    }
+    
+    /// Initialize Syphon with wgpu device and queue (macOS only)
+    #[cfg(target_os = "macos")]
+    pub fn initialize_syphon(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.syphon_device = Some(Arc::new(device.clone()));
+        self.syphon_queue = Some(Arc::new(queue.clone()));
+        
+        // Also initialize the receiver if it exists
+        if let Some(ref mut receiver) = self.syphon_receiver {
+            receiver.initialize(device, queue);
         }
     }
     
@@ -188,19 +220,39 @@ impl InputSource {
         Ok(())
     }
     
-    /// Start Syphon receiver (macOS only)
+    /// Start Syphon receiver (macOS only, requires wgpu initialization)
     #[cfg(target_os = "macos")]
     pub fn start_syphon(&mut self, server_name: impl Into<String>) -> Result<()> {
+        // Use stored wgpu resources if available
+        let server_name = server_name.into();
+        
+        // Clone the Arcs to avoid borrow issues
+        let device = self.syphon_device.clone();
+        let queue = self.syphon_queue.clone();
+        
+        if let (Some(device), Some(queue)) = (device, queue) {
+            self.start_syphon_with_wgpu(&server_name, &device, &queue)
+        } else {
+            Err(anyhow::anyhow!("InputSource not initialized with wgpu device/queue. Call initialize_syphon() first."))
+        }
+    }
+    
+    /// Start Syphon receiver with explicit wgpu device and queue (macOS only)
+    #[cfg(target_os = "macos")]
+    pub fn start_syphon_with_wgpu(&mut self, server_name: &str, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<()> {
         self.stop();
         
-        let server_name = server_name.into();
         let mut receiver = SyphonInputReceiver::new();
-        receiver.connect(&server_name)?;
+        receiver.initialize(device, queue);
+        receiver.connect(server_name)?;
         
         self.input_type = InputType::Syphon;
-        self.source_name = server_name.clone();
+        self.source_name = server_name.to_string();
         self.active = true;
         self.syphon_receiver = Some(receiver);
+        // Store the wgpu resources for future use
+        self.syphon_device = Some(Arc::new(device.clone()));
+        self.syphon_queue = Some(Arc::new(queue.clone()));
         
         log::info!("Started Syphon input: {}", server_name);
         
@@ -239,6 +291,8 @@ impl InputSource {
         #[cfg(target_os = "macos")]
         {
             self.syphon_receiver = None;
+            self.syphon_texture = None;
+            // Keep syphon_device and syphon_queue for potential reconnect
         }
         
         self.frame_receiver = None;
@@ -279,13 +333,16 @@ impl InputSource {
             }
         }
         
-        // Handle Syphon frames
+        // Handle Syphon frames (zero-copy texture path)
         #[cfg(target_os = "macos")]
         if let Some(ref mut syphon) = self.syphon_receiver {
-            if let Some(frame) = syphon.try_receive() {
-                self.resolution = (frame.width, frame.height);
-                self.current_frame = Some(frame.data);
+            // Use zero-copy texture receive path
+            if let Some(texture) = syphon.try_receive_texture() {
+                self.resolution = (texture.width(), texture.height());
+                self.syphon_texture = Some(texture);
                 self.has_new_frame = true;
+                log::trace!("[Input] Syphon texture received: {}x{}", 
+                    self.resolution.0, self.resolution.1);
             }
         }
     }
@@ -299,6 +356,22 @@ impl InputSource {
     pub fn take_frame(&mut self) -> Option<Vec<u8>> {
         self.has_new_frame = false;
         self.current_frame.take()
+    }
+    
+    /// Take the Syphon texture if available (zero-copy path, macOS only)
+    /// 
+    /// This is the preferred method for Syphon input as it avoids CPU readback.
+    /// Returns None if not on macOS or no texture available.
+    #[cfg(target_os = "macos")]
+    pub fn take_syphon_texture(&mut self) -> Option<wgpu::Texture> {
+        self.has_new_frame = false;
+        self.syphon_texture.take()
+    }
+    
+    /// Stub for non-macOS platforms
+    #[cfg(not(target_os = "macos"))]
+    pub fn take_syphon_texture(&mut self) -> Option<std::convert::Infallible> {
+        None
     }
     
     /// Get current resolution
@@ -348,6 +421,12 @@ pub struct InputManager {
     // Refresh flags
     webcam_dirty: bool,
     ndi_dirty: bool,
+    
+    // wgpu resources for Syphon (macOS only)
+    #[cfg(target_os = "macos")]
+    device: Option<Arc<wgpu::Device>>,
+    #[cfg(target_os = "macos")]
+    queue: Option<Arc<wgpu::Queue>>,
 }
 
 impl InputManager {
@@ -359,6 +438,23 @@ impl InputManager {
             ndi_sources: Vec::new(),
             webcam_dirty: true,
             ndi_dirty: true,
+            #[cfg(target_os = "macos")]
+            device: None,
+            #[cfg(target_os = "macos")]
+            queue: None,
+        }
+    }
+    
+    /// Initialize with wgpu device and queue (required for Syphon on macOS)
+    pub fn initialize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        #[cfg(target_os = "macos")]
+        {
+            self.device = Some(Arc::new(device.clone()));
+            self.queue = Some(Arc::new(queue.clone()));
+            
+            // Initialize input sources
+            self.input1.initialize_syphon(device, queue);
+            self.input2.initialize_syphon(device, queue);
         }
     }
     
@@ -456,12 +552,42 @@ impl InputManager {
     
     /// Start Syphon on input 1
     pub fn start_input1_syphon(&mut self, server_name: impl Into<String>) -> Result<()> {
-        self.input1.start_syphon(server_name)
+        let server_name = server_name.into();
+        
+        #[cfg(target_os = "macos")]
+        {
+            if let (Some(device), Some(queue)) = (&self.device, &self.queue) {
+                self.input1.start_syphon_with_wgpu(&server_name, device, queue)
+            } else {
+                Err(anyhow::anyhow!("InputManager not initialized with wgpu device/queue. Call initialize() first."))
+            }
+        }
+        
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = server_name;
+            Err(anyhow::anyhow!("Syphon is only available on macOS"))
+        }
     }
     
     /// Start Syphon on input 2
     pub fn start_input2_syphon(&mut self, server_name: impl Into<String>) -> Result<()> {
-        self.input2.start_syphon(server_name)
+        let server_name = server_name.into();
+        
+        #[cfg(target_os = "macos")]
+        {
+            if let (Some(device), Some(queue)) = (&self.device, &self.queue) {
+                self.input2.start_syphon_with_wgpu(&server_name, device, queue)
+            } else {
+                Err(anyhow::anyhow!("InputManager not initialized with wgpu device/queue. Call initialize() first."))
+            }
+        }
+        
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = server_name;
+            Err(anyhow::anyhow!("Syphon is only available on macOS"))
+        }
     }
     
     /// Stop input 1

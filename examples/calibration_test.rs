@@ -25,14 +25,11 @@ fn main() -> anyhow::Result<()> {
     // Create controller with fast timing for demo
     let timing = CalibrationTiming {
         countdown_seconds: 2,  // 2 second countdown
-        frames_per_display: 1,
-        ms_between_displays: 500, // 0.5 seconds per display
-        capture_timeout_ms: 1000,
+        capture_timeout_ms: 10000, // 10 second timeout
     };
     
     let mut controller = CalibrationController::new()
-        .with_timing(timing)
-        .with_auto_advance(true);
+        .with_timing(timing);
     
     // Start calibration for a 2x2 grid
     let grid_size = GridSize::two_by_two();
@@ -55,6 +52,12 @@ fn main() -> anyhow::Result<()> {
             rusty_mapper::videowall::CalibrationStatus::InProgress => {
                 // Continue
             }
+            rusty_mapper::videowall::CalibrationStatus::ReadyForCapture => {
+                // Patterns are showing, ready to capture
+            }
+            rusty_mapper::videowall::CalibrationStatus::Processing => {
+                // Processing captured frame
+            }
             rusty_mapper::videowall::CalibrationStatus::Complete(config) => {
                 println!("\n✓ Calibration complete!");
                 println!("  Displays configured: {}", config.displays.len());
@@ -68,8 +71,8 @@ fn main() -> anyhow::Result<()> {
             }
         }
         
-        // Simulate frame capture during flashing
-        if let CalibrationPhase::Flashing { current_display, .. } = controller.phase() {
+        // Simulate frame capture when showing patterns
+        if let CalibrationPhase::ShowingAllPatterns = controller.phase() {
             // Simulate capturing a frame
             let frame_data = vec![0u8; 1920 * 1080 * 4]; // Dummy RGBA frame
             controller.submit_frame(frame_data, 1920, 1080);
@@ -100,12 +103,10 @@ fn print_status(controller: &CalibrationController) {
                 progress * 100.0
             );
         }
-        CalibrationPhase::Flashing { current_display, total_displays, .. } => {
+        CalibrationPhase::ShowingAllPatterns => {
             if let Some(pattern) = controller.current_pattern() {
                 print!(
-                    "Status: Flashing display {}/{} ({}x{}) [{:>3.0}%]    ",
-                    current_display + 1,
-                    total_displays,
+                    "Status: Showing patterns ({}x{}) [{:>3.0}%]    ",
                     pattern.width(),
                     pattern.height(),
                     progress * 100.0
@@ -128,9 +129,6 @@ fn print_status(controller: &CalibrationController) {
         }
         CalibrationPhase::Error(ref e) => {
             print!("Status: Error - {}              ", e);
-        }
-        _ => {
-            print!("Status: {:?} [{:>3.0}%]          ", phase, progress * 100.0);
         }
     }
     

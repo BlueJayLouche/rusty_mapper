@@ -339,6 +339,60 @@ Useful when:
 - Webcam support is not needed
 - Building for headless deployment
 
+## Video Matrix / Grid Mapping
+
+The application supports projection mapping to multiple displays via an HDMI video matrix using a **grid subdivision approach**:
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     INPUT TEXTURE                                │
+│              (Subdivided into configurable N×M grid)            │
+│                                                                  │
+│   ┌───┬───┬───┐                                                  │
+│   │ 0 │ 1 │ 2 │  Each cell can be mapped to output grid cell    │
+│   ├───┼───┼───┤                                                  │
+│   │ 3 │ 4 │ 5 │                                                  │
+│   ├───┼───┼───┤                                                  │
+│   │ 6 │ 7 │ 8 │                                                  │
+│   └───┴───┴───┘                                                  │
+└─────────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              RENDER PIPELINE (per mapped cell)                   │
+│                                                                  │
+│   Input Cell → Aspect Ratio → Orientation → Output Position     │
+│                    ↑                ↑                           │
+│            (AprilTag detected)   (AprilTag detected)            │
+└─────────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              SINGLE FULLSCREEN OUTPUT                            │
+│         (Sent to HDMI Video Matrix → Physical Displays)         │
+│                                                                  │
+│   ┌────┬────┬────┐                                               │
+│   │ A  │ B  │ C  │  A=Cell 0 mapped (4:3, 0°)                   │
+│   ├────┼────┼────┤  B=Cell 1 mapped (16:9, 0°)                  │
+│   │ -- │ -- │ -- │  C=Cell 2 mapped (16:9, 90°)                 │
+│   ├────┼────┼────┤  --=Unmapped (black)                         │
+│   │ -- │ -- │ -- │                                               │
+│   └────┴────┴────┘                                               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Features
+
+- **Configurable Grid**: N×M subdivision of input texture (3×3 default)
+- **Per-Cell Mapping**: Each grid cell maps independently to output
+- **AprilTag Detection**: Auto-detects aspect ratio and orientation from markers
+- **Single Output**: One HDMI output feeds the video matrix
+- **Unmapped Cells**: Render as black (no signal)
+
+See [DESIGN_GUI_LAYOUT.md](DESIGN_GUI_LAYOUT.md) for detailed UI design.
+
 ## Future Extensions
 
 1. **Syphon/Spout**: macOS/Windows GPU texture sharing
@@ -347,3 +401,4 @@ Useful when:
 4. **Multi-output**: Multiple NDI outputs, different resolutions
 5. **Projection Mapping**: Mesh warping for geometry correction
 6. **More Input Types**: SDI capture cards, Blackmagic devices
+7. **Multiple Matrix Outputs**: Support multiple independent video matrices

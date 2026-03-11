@@ -8,6 +8,11 @@ pub mod videowall;
 
 // Re-export commonly used types
 pub use videowall::{
+    // AprilTag (pure Rust, recommended)
+    AprilTagDetector, AprilTagDetection, AprilTagFamily, AprilTagGenerator,
+    // Test patterns
+    TestPattern,
+    // ArUco (OpenCV-based, may have compatibility issues)
     ArUcoDetector, ArUcoDictionary, ArUcoGenerator, CalibrationController,
     CalibrationError, CalibrationInfo, CalibrationMode, CalibrationPhase,
     CalibrationStatus, CalibrationTiming, DisplayConfig, DisplayQuad, 

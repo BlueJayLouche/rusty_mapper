@@ -109,6 +109,7 @@ impl Default for DisplayQuadUniform {
 }
 
 /// Video wall uniform data updated per frame
+/// Must match the WGSL struct layout (16-byte aligned)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct VideoWallUniforms {
@@ -117,6 +118,8 @@ pub struct VideoWallUniforms {
     /// Output resolution
     pub output_width: f32,
     pub output_height: f32,
+    /// Padding to align background_color to 16 bytes
+    _padding: u32,
     /// Background color (RGBA)
     pub background_color: [f32; 4],
 }
@@ -127,6 +130,7 @@ impl Default for VideoWallUniforms {
             display_count: 0,
             output_width: 1920.0,
             output_height: 1080.0,
+            _padding: 0,
             background_color: [0.0, 0.0, 0.0, 1.0], // Black
         }
     }
@@ -326,6 +330,7 @@ impl VideoWallRenderer {
             display_count: config.displays.len() as u32,
             output_width: self.output_resolution.0 as f32,
             output_height: self.output_resolution.1 as f32,
+            _padding: 0,
             background_color: self.background_color,
         };
 
@@ -353,10 +358,19 @@ impl VideoWallRenderer {
     /// Set output resolution
     pub fn set_output_resolution(&mut self, width: u32, height: u32) {
         self.output_resolution = (width, height);
-        
-        // Update uniforms if we have a config
-        if self.config.is_some() {
-            // Will be updated on next frame via update_config or we could update just the uniforms
+    }
+    
+    /// Update uniforms buffer with current config and output resolution
+    fn update_uniforms(&mut self, queue: &wgpu::Queue) {
+        if let Some(ref config) = self.config {
+            let uniforms = VideoWallUniforms {
+                display_count: config.displays.len() as u32,
+                output_width: self.output_resolution.0 as f32,
+                output_height: self.output_resolution.1 as f32,
+                _padding: 0,
+                background_color: self.background_color,
+            };
+            queue.write_buffer(&self.uniforms_buffer, 0, bytemuck::bytes_of(&uniforms));
         }
     }
 
@@ -372,12 +386,20 @@ impl VideoWallRenderer {
 
     /// Render the video wall
     pub fn render(
-        &self,
+        &mut self,
         encoder: &mut wgpu::CommandEncoder,
         source_texture_view: &wgpu::TextureView,
         output_view: &wgpu::TextureView,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        output_width: u32,
+        output_height: u32,
     ) {
+        // Update output resolution and uniforms if changed
+        if self.output_resolution != (output_width, output_height) {
+            self.output_resolution = (output_width, output_height);
+            self.update_uniforms(queue);
+        }
         // Create texture bind group for this frame
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Video Wall Sampler"),

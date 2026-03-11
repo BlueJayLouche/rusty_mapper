@@ -14,7 +14,36 @@ pub struct Texture {
 }
 
 impl Texture {
-    /// Create a texture from raw RGBA data
+    /// Create a Texture from an existing wgpu texture
+    /// 
+    /// This is useful for zero-copy integration with external texture sources like Syphon
+    pub fn from_wgpu_texture(
+        texture: wgpu::Texture,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        
+        Self {
+            texture,
+            view,
+            sampler,
+            width,
+            height,
+        }
+    }
+    
+    /// Create a texture from raw RGBA data (for input textures with COPY_SRC for preview)
     pub fn from_rgba(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -35,8 +64,10 @@ impl Texture {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING 
+                | wgpu::TextureUsages::COPY_DST 
+                | wgpu::TextureUsages::COPY_SRC,  // Added COPY_SRC for preview
             view_formats: &[],
         });
         
@@ -76,12 +107,29 @@ impl Texture {
         }
     }
     
-    /// Create a render target texture
+    /// Create a render target texture (default format: Bgra8Unorm)
     pub fn create_render_target(
         device: &wgpu::Device,
         width: u32,
         height: u32,
         label: &str,
+    ) -> Self {
+        Self::create_render_target_with_format(
+            device,
+            width,
+            height,
+            label,
+            wgpu::TextureFormat::Bgra8Unorm,
+        )
+    }
+    
+    /// Create a render target texture with specific format
+    pub fn create_render_target_with_format(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        label: &str,
+        format: wgpu::TextureFormat,
     ) -> Self {
         let size = wgpu::Extent3d {
             width,
@@ -95,7 +143,7 @@ impl Texture {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING 
                 | wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::COPY_SRC
@@ -231,6 +279,87 @@ impl InputTextureManager {
         self.ensure_input2(width, height);
         if let Some(ref tex) = self.input2 {
             tex.update(&self.queue, data);
+            self.input2_has_data = true;
+        }
+    }
+    
+    /// Update input 1 from a wgpu texture (GPU-to-GPU copy, zero-copy CPU-wise)
+    /// 
+    /// This is the most efficient path for Syphon input - copies directly from
+    /// the received Syphon texture to the input texture without CPU readback
+    pub fn update_input1_from_texture(&mut self, source: &wgpu::Texture) {
+        let width = source.width();
+        let height = source.height();
+        
+        // Ensure our input texture exists with correct size
+        self.ensure_input1(width, height);
+        
+        if let Some(ref dest) = self.input1 {
+            // Create a command encoder for the copy
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Input1 Texture Copy"),
+            });
+            
+            // GPU-to-GPU copy (zero CPU involvement)
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: source,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &dest.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            
+            // Submit the copy command
+            self.queue.submit(std::iter::once(encoder.finish()));
+            self.input1_has_data = true;
+        }
+    }
+    
+    /// Update input 2 from a wgpu texture (GPU-to-GPU copy, zero-copy CPU-wise)
+    pub fn update_input2_from_texture(&mut self, source: &wgpu::Texture) {
+        let width = source.width();
+        let height = source.height();
+        
+        self.ensure_input2(width, height);
+        
+        if let Some(ref dest) = self.input2 {
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Input2 Texture Copy"),
+            });
+            
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: source,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &dest.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            
+            self.queue.submit(std::iter::once(encoder.finish()));
             self.input2_has_data = true;
         }
     }

@@ -102,7 +102,7 @@ impl QuadMapper {
         // Filter valid detections
         let valid_detections: Vec<_> = detections
             .iter()
-            .filter(|d| d.marker.as_ref().map_or(false, |m| m.confidence >= config.min_confidence))
+            .filter(|d| d.confidence >= config.min_confidence)
             .collect();
         
         if valid_detections.len() != detections.len() {
@@ -203,16 +203,13 @@ impl QuadMapper {
     }
     
     /// Compute geometry from detection
-    fn compute_geometry(detection: &DisplayDetection, camera_resolution: (u32, u32)) -> MarkerGeometry {
-        let marker = detection.marker.as_ref().unwrap();
-        let (w, h) = (camera_resolution.0 as f32, camera_resolution.1 as f32);
-        
+    fn compute_geometry(detection: &DisplayDetection, _camera_resolution: (u32, u32)) -> MarkerGeometry {
         // Convert corners to Vec2 in pixel coordinates
         let corners: [Vec2; 4] = [
-            Vec2::new(marker.corners[0][0], marker.corners[0][1]),
-            Vec2::new(marker.corners[1][0], marker.corners[1][1]),
-            Vec2::new(marker.corners[2][0], marker.corners[2][1]),
-            Vec2::new(marker.corners[3][0], marker.corners[3][1]),
+            Vec2::new(detection.corners[0][0], detection.corners[0][1]),
+            Vec2::new(detection.corners[1][0], detection.corners[1][1]),
+            Vec2::new(detection.corners[2][0], detection.corners[2][1]),
+            Vec2::new(detection.corners[3][0], detection.corners[3][1]),
         ];
         
         // Calculate center
@@ -233,7 +230,7 @@ impl QuadMapper {
             size,
             orientation,
             corners,
-            confidence: marker.confidence,
+            confidence: detection.confidence,
         }
     }
     
@@ -487,16 +484,13 @@ mod tests {
         
         DisplayDetection {
             display_id: id,
-            marker: Some(DetectedMarker {
-                id,
-                corners: [
-                    [cx - half, cy - half], // Top-left
-                    [cx + half, cy - half], // Top-right
-                    [cx + half, cy + half], // Bottom-right
-                    [cx - half, cy + half], // Bottom-left
-                ],
-                confidence: 0.95,
-            }),
+            corners: [
+                [cx - half, cy - half], // Top-left
+                [cx + half, cy - half], // Top-right
+                [cx + half, cy + half], // Bottom-right
+                [cx - half, cy + half], // Bottom-left
+            ],
+            confidence: 0.95,
             frame_width: 1920,
             frame_height: 1080,
         }

@@ -2,7 +2,7 @@
 //!
 //! Thread-safe state shared between windows, threads, and the render loop.
 
-use crate::videowall::{VideoWallConfig, CalibrationController};
+use crate::videowall::{VideoWallConfig, CalibrationController, VideoMatrixConfig, InputGridConfig, GridSize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -163,6 +163,10 @@ pub enum InputChangeRequest {
     StartObs {
         source_name: String,
     },
+    #[cfg(target_os = "macos")]
+    StartSyphon {
+        server_name: String,
+    },
     StopInput,
     RefreshDevices,
 }
@@ -213,6 +217,14 @@ pub struct SharedState {
     pub videowall_calibration: Option<CalibrationController>,
     pub videowall_config: Option<VideoWallConfig>,
     pub videowall_enabled: bool,
+    
+    // Video matrix (grid-based mapping)
+    pub video_matrix_config: VideoMatrixConfig,
+    pub video_matrix_enabled: bool,
+    
+    // Matrix test pattern (AprilTag pattern for calibration)
+    pub matrix_test_pattern: Option<(Vec<u8>, u32, u32)>, // (rgba_data, width, height)
+    pub matrix_showing_test_pattern: bool, // True when test pattern should be displayed
     
     // Manual corner adjustment mode
     pub videowall_edit_mode: bool,
@@ -291,6 +303,10 @@ impl SharedState {
             videowall_calibration: None,
             videowall_config: None,
             videowall_enabled: false,
+            video_matrix_config: VideoMatrixConfig::new(GridSize::new(3, 3)),
+            video_matrix_enabled: false,
+            matrix_test_pattern: None,
+            matrix_showing_test_pattern: false,
             videowall_edit_mode: false,
             videowall_edit_display: None,
             videowall_edit_corner: None,

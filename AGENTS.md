@@ -115,6 +115,41 @@ pub enum InputChangeRequest {
 
 GUI sets the request, App processes it in `about_to_wait()`.
 
+## Video Matrix / Grid Mapping
+
+The application implements a **grid-based video matrix** system for projection mapping:
+
+### Concept
+- Input texture is subdivided into a configurable N×M grid (e.g., 3×3)
+- Each grid cell can be mapped to a position in the output
+- Output is a single fullscreen window sent to an HDMI video matrix
+- Physical displays receive their portion from the matrix
+
+### Grid Cell Mapping
+```
+Input (3×3 grid):         Output (single fullscreen):
+┌───┬───┬───┐            ┌──────┬──────────┬──────┐
+│ 1 │ 2 │ 3 │            │  1   │    2     │  3   │
+├───┼───┼───┤    →       │ 4:3  │   16:9   │16:9  │
+│ 4 │ 5 │ 6 │            │      │ landscape│port  │
+├───┼───┼───┤            ├──────┼──────────┼──────┤
+│ 7 │ 8 │ 9 │            │BLACK │  BLACK   │BLACK │
+└───┴───┴───┘            └──────┴──────────┴──────┘
+```
+
+### AprilTag Integration
+- AprilTag markers on physical displays auto-detect:
+  - **Aspect ratio** (4:3, 16:9, etc.) from marker geometry
+  - **Orientation** (0°, 90°, 180°, 270°) from marker rotation
+- If rotated 90° CW: input top-left → output top-right
+
+### Implementation Notes
+- Single selectable input per output matrix (Input 1 or Input 2)
+- Unmapped cells render as black
+- Cells can theoretically overlap but unlikely in practice
+- No edge blending between adjacent displays
+- See [DESIGN_GUI_LAYOUT.md](DESIGN_GUI_LAYOUT.md) for UI details
+
 ## Testing NDI
 
 Install NDI Tools for testing:

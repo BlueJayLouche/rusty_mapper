@@ -6,6 +6,7 @@ use crate::config::AppConfig;
 use crate::core::{SharedState, Vertex, InputMapping};
 use crate::engine::texture::{Texture, InputTextureManager};
 use crate::output::OutputManager;
+use crate::videowall::{VideoWallRenderer, VideoWallConfig, VideoMatrixRenderer, VideoMatrixConfig};
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -90,6 +91,16 @@ pub struct WgpuEngine {
     uniform_buffer_input1: wgpu::Buffer,
     uniform_buffer_input2: wgpu::Buffer,
     uniform_buffer_mix: wgpu::Buffer,
+    
+    // Video wall renderer
+    video_wall_renderer: Option<VideoWallRenderer>,
+    video_wall_enabled: bool,
+    video_wall_output_texture: Option<Texture>,
+    
+    // Video matrix renderer (grid-based mapping)
+    video_matrix_renderer: Option<VideoMatrixRenderer>,
+    video_matrix_enabled: bool,
+    video_matrix_output_texture: Option<Texture>,
 }
 
 impl WgpuEngine {
@@ -304,7 +315,7 @@ impl WgpuEngine {
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: wgpu::TextureFormat::Bgra8Unorm,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -370,6 +381,12 @@ impl WgpuEngine {
             uniform_buffer_input1,
             uniform_buffer_input2,
             uniform_buffer_mix,
+            video_wall_renderer: None,
+            video_wall_enabled: false,
+            video_wall_output_texture: None,
+            video_matrix_renderer: None,
+            video_matrix_enabled: false,
+            video_matrix_output_texture: None,
         })
     }
     
@@ -403,6 +420,118 @@ impl WgpuEngine {
     pub fn set_target_fps(&mut self, fps: u32) {
         self.target_fps = fps.max(1).min(240);
         log::info!("Target FPS set to {}", self.target_fps);
+    }
+    
+    /// Enable/disable video wall rendering
+    pub fn set_video_wall_enabled(&mut self, enabled: bool) {
+        if self.video_wall_enabled != enabled {
+            self.video_wall_enabled = enabled;
+            log::info!("Video wall {}", if enabled { "enabled" } else { "disabled" });
+            
+            // Initialize video wall renderer if enabling
+            if enabled && self.video_wall_renderer.is_none() {
+                self.video_wall_renderer = Some(VideoWallRenderer::new(
+                    &self.device,
+                    &self.queue,
+                    self.config.format,
+                ));
+                
+                // Create output texture for video wall with same format as surface
+                let internal_width = self.render_target.width;
+                let internal_height = self.render_target.height;
+                self.video_wall_output_texture = Some(Texture::create_render_target_with_format(
+                    &self.device,
+                    internal_width,
+                    internal_height,
+                    "Video Wall Output",
+                    self.config.format,
+                ));
+            }
+        }
+    }
+    
+    /// Update video wall configuration (only if changed)
+    pub fn update_video_wall_config(&mut self, config: &VideoWallConfig) {
+        if let Some(ref mut renderer) = self.video_wall_renderer {
+            // Only update if config has actually changed
+            let should_update = renderer.config().map(|existing| {
+                existing.displays.len() != config.displays.len() ||
+                existing.grid_size != config.grid_size
+            }).unwrap_or(true);
+            
+            if should_update {
+                renderer.update_config(config, &self.device, &self.queue);
+                log::info!("Video wall config updated: {} displays", config.displays.len());
+            }
+        }
+    }
+    
+    /// Check if video wall is enabled
+    pub fn is_video_wall_enabled(&self) -> bool {
+        self.video_wall_enabled
+    }
+    
+    /// Enable/disable video matrix rendering
+    pub fn set_video_matrix_enabled(&mut self, enabled: bool) {
+        if self.video_matrix_enabled != enabled {
+            self.video_matrix_enabled = enabled;
+            log::info!("Video matrix {}", if enabled { "enabled" } else { "disabled" });
+            
+            // Initialize video matrix renderer if enabling
+            if enabled && self.video_matrix_renderer.is_none() {
+                let mut renderer = VideoMatrixRenderer::new(
+                    &self.device,
+                    &self.queue,
+                    self.config.format,
+                );
+                
+                // Set output resolution from render target
+                renderer.set_output_resolution(self.render_target.width, self.render_target.height);
+                
+                self.video_matrix_renderer = Some(renderer);
+                
+                // Create output texture for video matrix
+                let internal_width = self.render_target.width;
+                let internal_height = self.render_target.height;
+                self.video_matrix_output_texture = Some(Texture::create_render_target_with_format(
+                    &self.device,
+                    internal_width,
+                    internal_height,
+                    "Video Matrix Output",
+                    self.config.format,
+                ));
+            }
+        }
+    }
+    
+    /// Update video matrix configuration
+    pub fn update_video_matrix_config(&mut self, config: &VideoMatrixConfig) {
+        if let Some(ref mut renderer) = self.video_matrix_renderer {
+            // Ensure output resolution is set before updating config
+            renderer.set_output_resolution(self.render_target.width, self.render_target.height);
+            renderer.update_config(config, &self.device, &self.queue);
+            log::debug!("Video matrix config updated");
+        }
+    }
+    
+    /// Check if video matrix is enabled
+    pub fn is_video_matrix_enabled(&self) -> bool {
+        self.video_matrix_enabled
+    }
+    
+    /// Get reference to input texture manager
+    pub fn input_texture_manager(&self) -> &InputTextureManager {
+        &self.input_texture_manager
+    }
+    
+    /// Get reference to render target texture
+    pub fn render_target(&self) -> &Texture {
+        &self.render_target
+    }
+    
+    /// Get reference to video matrix output texture (if enabled)
+    pub fn video_matrix_output_texture(&self) -> Option<&Texture> {
+        self.video_matrix_output_texture.as_ref()
     }
     
     /// Start NDI output
@@ -577,8 +706,63 @@ impl WgpuEngine {
             render_pass.draw(0..6, 0..1);
         }
         
-        // Blit render target to surface
-        self.blit_to_surface(&mut encoder, &surface_view, &self.render_target.view);
+        // Apply video matrix rendering if enabled
+        let final_output_view = if self.video_matrix_enabled {
+            if let (Some(ref mut video_matrix), Some(ref output_tex)) = 
+                (self.video_matrix_renderer.as_mut(), self.video_matrix_output_texture.as_ref()) 
+            {
+                // Check if video matrix has config
+                let has_config = video_matrix.has_config();
+                let has_bind_group = video_matrix.has_uniform_bind_group();
+                
+                if self.frame_count % 60 == 0 {
+                    log::debug!("Video Matrix: enabled={}, has_config={}, has_bind_group={}", 
+                        self.video_matrix_enabled, has_config, has_bind_group);
+                }
+                
+                // Render video matrix to output texture
+                video_matrix.render(
+                    &mut encoder,
+                    &self.render_target.view,  // Source: main render output
+                    &output_tex.view,          // Destination: video matrix output
+                    &self.device,
+                    &self.queue,
+                    output_tex.width,
+                    output_tex.height,
+                );
+                &output_tex.view
+            } else {
+                if self.frame_count % 60 == 0 {
+                    log::debug!("Video Matrix: renderer={:?}, output_tex={:?}", 
+                        self.video_matrix_renderer.is_some(), 
+                        self.video_matrix_output_texture.is_some());
+                }
+                &self.render_target.view
+            }
+        } else if self.video_wall_enabled {
+            // Fall back to video wall if matrix is not enabled
+            if let (Some(ref mut video_wall), Some(ref output_tex)) = 
+                (self.video_wall_renderer.as_mut(), self.video_wall_output_texture.as_ref()) 
+            {
+                video_wall.render(
+                    &mut encoder,
+                    &self.render_target.view,
+                    &output_tex.view,
+                    &self.device,
+                    &self.queue,
+                    output_tex.width,
+                    output_tex.height,
+                );
+                &output_tex.view
+            } else {
+                &self.render_target.view
+            }
+        } else {
+            &self.render_target.view
+        };
+        
+        // Blit final output to surface
+        self.blit_to_surface(&mut encoder, &surface_view, final_output_view);
         
         // Submit commands to GPU
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -587,8 +771,19 @@ impl WgpuEngine {
         surface_texture.present();
         
         // Submit frame to all active outputs (Syphon, NDI, etc.)
-        // Note: This uses the render_target texture which contains the final output
-        self.output_manager.submit_frame(&self.render_target.texture, &self.device, &self.queue);
+        // Use video matrix output if enabled, then video wall, otherwise use render target
+        let output_texture = if self.video_matrix_enabled {
+            self.video_matrix_output_texture.as_ref()
+                .map(|t| &t.texture)
+                .unwrap_or(&self.render_target.texture)
+        } else if self.video_wall_enabled {
+            self.video_wall_output_texture.as_ref()
+                .map(|t| &t.texture)
+                .unwrap_or(&self.render_target.texture)
+        } else {
+            &self.render_target.texture
+        };
+        self.output_manager.submit_frame(output_texture, &self.device, &self.queue);
         
         self.frame_count += 1;
     }
@@ -644,13 +839,22 @@ impl WgpuEngine {
             ],
         });
         
-        // Simple blit shader
+        // Simple blit shader with aspect ratio preservation
+        // Uses the vertex texcoords directly instead of calculating from frag_coord
         let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Blit Shader"),
             source: wgpu::ShaderSource::Wgsl(r#"
+                struct VertexOutput {
+                    @builtin(position) position: vec4<f32>,
+                    @location(0) texcoord: vec2<f32>,
+                };
+                
                 @vertex
-                fn vs_main(@location(0) position: vec2<f32>, @location(1) texcoord: vec2<f32>) -> @builtin(position) vec4<f32> {
-                    return vec4<f32>(position, 0.0, 1.0);
+                fn vs_main(@location(0) position: vec2<f32>, @location(1) texcoord: vec2<f32>) -> VertexOutput {
+                    var out: VertexOutput;
+                    out.position = vec4<f32>(position, 0.0, 1.0);
+                    out.texcoord = texcoord;
+                    return out;
                 }
                 
                 @group(0) @binding(0)
@@ -659,9 +863,8 @@ impl WgpuEngine {
                 var source_sampler: sampler;
                 
                 @fragment
-                fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
-                    let uv = frag_coord.xy / vec2<f32>(textureDimensions(source_tex));
-                    return textureSample(source_tex, source_sampler, uv);
+                fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+                    return textureSample(source_tex, source_sampler, in.texcoord);
                 }
             "#.into()),
         });
@@ -766,5 +969,18 @@ impl WgpuEngine {
         self.input_texture_manager.update_input1(rgba_data, width, height);
         
         log::debug!("Uploaded calibration pattern: {}x{}", width, height);
+    }
+    
+    /// Upload test pattern for matrix calibration
+    /// Displays AprilTag marker pattern on the output window
+    pub fn upload_test_pattern(&mut self, rgba_data: &[u8], width: u32, height: u32) -> anyhow::Result<()> {
+        // Ensure input1 texture exists at the right size
+        self.input_texture_manager.ensure_input1(width, height);
+        
+        // Upload the pattern data
+        self.input_texture_manager.update_input1(rgba_data, width, height);
+        
+        log::debug!("Uploaded matrix test pattern: {}x{}", width, height);
+        Ok(())
     }
 }

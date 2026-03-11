@@ -4,7 +4,7 @@
 //! Simplified approach following rustjay_waaaves pattern.
 
 use imgui::Context;
-use imgui_wgpu::{Renderer, RendererConfig};
+use imgui_wgpu::{Renderer, RendererConfig, Texture, TextureConfig};
 use std::sync::Arc;
 use winit::window::Window;
 
@@ -115,6 +115,94 @@ impl ImGuiRenderer {
             queue,
             window,
         })
+    }
+    
+    /// Create a preview texture that can be displayed in ImGui
+    /// Returns the TextureId to use with imgui::Image
+    pub fn create_preview_texture(&mut self, width: u32, height: u32) -> imgui::TextureId {
+        // Use Bgra8Unorm for consistency with macOS native format
+        let texture_config = TextureConfig {
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            label: Some("Preview Texture"),
+            format: Some(wgpu::TextureFormat::Bgra8Unorm),
+            usage: wgpu::TextureUsages::TEXTURE_BINDING 
+                | wgpu::TextureUsages::COPY_DST 
+                | wgpu::TextureUsages::COPY_SRC,
+            ..Default::default()
+        };
+        
+        let texture = Texture::new(&self.device, &self.renderer, texture_config);
+        
+        // Insert into renderer's texture map and get the ID
+        let texture_id = self.renderer.textures.insert(texture);
+        
+        texture_id
+    }
+    
+    /// Update a preview texture with data from a source texture
+    /// This copies the source texture to the preview texture
+    pub fn update_preview_texture(
+        &mut self,
+        preview_id: imgui::TextureId,
+        source_texture: &wgpu::Texture,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if let Some(preview_texture) = self.renderer.textures.get(preview_id) {
+            // Copy from source to preview
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: source_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: preview_texture.texture(),
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: preview_texture.width().min(source_texture.width()),
+                    height: preview_texture.height().min(source_texture.height()),
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+    
+    /// Get the wgpu texture for a preview ID (for copying data to it)
+    pub fn get_preview_texture(&self, preview_id: imgui::TextureId) -> Option<&wgpu::Texture> {
+        self.renderer.textures.get(preview_id).map(|t| t.texture())
+    }
+    
+    /// Remove a registered texture
+    pub fn remove_texture(&mut self, texture_id: imgui::TextureId) {
+        self.renderer.textures.remove(texture_id);
+    }
+    
+    /// Get a reference to the renderer (for texture access)
+    pub fn renderer(&self) -> &Renderer {
+        &self.renderer
+    }
+    
+    /// Get a mutable reference to the renderer
+    pub fn renderer_mut(&mut self) -> &mut Renderer {
+        &mut self.renderer
+    }
+    
+    /// Get reference to device
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+    
+    /// Get reference to queue
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
     
     /// Handle window events and update ImGui IO

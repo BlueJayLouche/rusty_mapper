@@ -24,7 +24,7 @@ pub struct NdiSourceInfo {
 pub struct NdiFrame {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>, // RGBA format
+    pub data: Vec<u8>, // BGRA format (native for macOS/wgpu)
     pub timestamp: Instant,
 }
 
@@ -171,7 +171,7 @@ impl NdiReceiver {
                 }
             };
 
-            // Create receiver with BGRA format (we'll convert to RGBA)
+            // Create receiver with BGRA format (native for wgpu on macOS)
             let options = ReceiverOptions::builder(source)
                 .color(ReceiverColorFormat::BGRX_BGRA)
                 .bandwidth(ReceiverBandwidth::Highest)
@@ -195,16 +195,13 @@ impl NdiReceiver {
                         let width = video_frame.width() as u32;
                         let height = video_frame.height() as u32;
                         
-                        // Get frame data
+                        // Get frame data (already BGRA, no conversion needed)
                         let frame_data = video_frame.data();
                         
-                        // Convert BGRA to RGBA
-                        let data = convert_bgra_to_rgba(frame_data, width, height);
-
                         let frame = NdiFrame {
                             width,
                             height,
-                            data,
+                            data: frame_data.to_vec(),
                             timestamp: Instant::now(),
                         };
 
@@ -272,45 +269,6 @@ impl Drop for NdiReceiver {
     }
 }
 
-/// Convert BGRA data to RGBA
-/// 
-/// NDI typically sends BGRA, but wgpu/shaders expect RGBA
-/// Note: NDI frame data may have row stride/padding
-fn convert_bgra_to_rgba(bgra_data: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let pixel_count = (width * height) as usize;
-    let mut rgba_data = vec![0u8; pixel_count * 4];
-    
-    // Calculate stride - NDI often uses aligned rows
-    // The data length divided by height gives us the actual stride
-    let actual_stride = if height > 0 {
-        bgra_data.len() / height as usize
-    } else {
-        width as usize * 4
-    };
-    
-    let expected_stride = width as usize * 4;
-    
-    log::debug!("[NDI] Converting frame: {}x{}, data_len={}, actual_stride={}, expected_stride={}",
-        width, height, bgra_data.len(), actual_stride, expected_stride);
-
-    for y in 0..height as usize {
-        for x in 0..width as usize {
-            let src_idx = y * actual_stride + x * 4;
-            let dst_idx = (y * width as usize + x) * 4;
-            
-            if src_idx + 3 < bgra_data.len() && dst_idx + 3 < rgba_data.len() {
-                // BGRA -> RGBA: swap B and R
-                rgba_data[dst_idx] = bgra_data[src_idx + 2];     // R <- B
-                rgba_data[dst_idx + 1] = bgra_data[src_idx + 1]; // G <- G
-                rgba_data[dst_idx + 2] = bgra_data[src_idx];     // B <- R
-                rgba_data[dst_idx + 3] = bgra_data[src_idx + 3]; // A <- A
-            }
-        }
-    }
-
-    rgba_data
-}
-
 /// Global NDI availability check
 pub fn is_ndi_available() -> bool {
     NDI::new().is_ok()
@@ -324,28 +282,4 @@ pub fn list_ndi_sources(timeout_ms: u32) -> Vec<String> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn test_bgra_to_rgba_conversion() {
-        // Test data: 2x1 pixel BGRA image
-        let bgra = vec![
-            255, 0, 0, 255,    // Blue (BGRA) -> Red (RGBA)
-            0, 255, 0, 255,    // Green stays green
-        ];
-        
-        let rgba = convert_bgra_to_rgba(&bgra, 2, 1);
-        
-        assert_eq!(rgba[0], 0);      // R
-        assert_eq!(rgba[1], 0);      // G
-        assert_eq!(rgba[2], 255);    // B (was R in BGRA)
-        assert_eq!(rgba[3], 255);    // A
-        
-        assert_eq!(rgba[4], 0);      // R
-        assert_eq!(rgba[5], 255);    // G
-        assert_eq!(rgba[6], 0);      // B
-        assert_eq!(rgba[7], 255);    // A
-    }
-}

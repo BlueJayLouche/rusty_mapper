@@ -1,6 +1,6 @@
 //! # Video Wall Auto-Calibration
 //!
-//! Auto-calibration system for HDMI matrix video walls using ArUco markers.
+//! Auto-calibration system for HDMI matrix video walls using AprilTag markers.
 //! Supports any grid configuration (2x2, 3x3, 4x4, etc.).
 //!
 //! ## Usage
@@ -17,21 +17,39 @@
 //! let markers = detector.detect_markers(&frame)?;
 //! ```
 
+pub mod apriltag;
+pub mod apriltag_auto_detect;
 pub mod aruco;
 pub mod calibration;
 pub mod config;
+pub mod grid_mapping;
+pub mod matrix_renderer;
 pub mod quad_mapper;
 pub mod renderer;
+pub mod test_pattern;
 
+// AprilTag (pure Rust, recommended)
+pub use apriltag::{AprilTagDetector, AprilTagFamily, AprilTagGenerator, AprilTagDetection};
+pub use apriltag_auto_detect::{
+    AprilTagAutoDetector, AutoDetectConfig, DetectedScreen, TagPlacement, texture_to_gray_image
+};
+pub use test_pattern::{TestPattern};
+
+// ArUco (requires OpenCV, may have compatibility issues with OpenCV 4.13+)
 pub use aruco::{ArUcoDetector, ArUcoDictionary, ArUcoGenerator, DetectedMarker};
 pub use calibration::{
     CalibrationController, CalibrationError, CalibrationMode, CalibrationPhase,
     CalibrationStatus, CalibrationTiming, CapturedFrame, DisplayDetection,
     MarkerDisplayConfig,
 };
+pub use matrix_renderer::{VideoMatrixRenderer, MatrixUniforms, CellMappingUniform, MAX_MAPPINGS};
 pub use quad_mapper::{QuadMapper, QuadMapConfig, QuadMapResult};
 pub use renderer::{DisplayQuadUniform, VideoWallRenderer, VideoWallUniforms, MAX_DISPLAYS};
 pub use config::{CalibrationInfo, DisplayConfig, VideoWallConfig, ConfigPreset, PresetManager, PresetInfo};
+pub use grid_mapping::{
+    AspectRatio, Orientation, GridPosition, GridCellMapping, 
+    InputGridConfig, VideoMatrixConfig, DetectedScreenRegion
+};
 
 use glam::{Mat3, Vec2};
 use serde::{Deserialize, Serialize};
@@ -57,7 +75,7 @@ pub struct DisplayQuad {
 }
 
 /// Rectangle in UV space (0-1 range)
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,

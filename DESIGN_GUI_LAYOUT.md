@@ -526,6 +526,204 @@ If vertical space is limited:
 - Output preview expands to 70%
 - Or stack vertically with tabs
 
+## Grid-Based Video Matrix Mapping
+
+Based on the [LAYOUT.JPG](LAYOUT.JPG) sketch, the GUI implements a **grid subdivision system** for mapping input regions to physical displays via an HDMI video matrix.
+
+### Core Concept
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      INPUT TEXTURE                               │
+│                    ( subdivided into N×M grid )                 │
+│                                                                  │
+│  ┌─────┬─────┬─────┐                                            │
+│  │  1  │  2  │  3  │  ← Grid cells that can be mapped          │
+│  ├─────┼─────┼─────┤     to any output display                 │
+│  │  4  │  5  │  6  │                                            │
+│  ├─────┼─────┼─────┤                                            │
+│  │  7  │  8  │  9  │                                            │
+│  └─────┴─────┴─────┘                                            │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    EXAMPLE MAPPING                               │
+│                                                                  │
+│   ┌───┐  ┌──────────┐  ┌───┐                                    │
+│   │   │  │          │  │ ↑ │  ← Each cell maps to a physical   │
+│   │ 1 │  │    2     │  │ 3 │     display with independent:     │
+│   │4:3│  │   16:9   │  │16:9│    - Aspect ratio                │
+│   │   │  │ landscape│  │port│    - Orientation                 │
+│   └───┘  │          │  │   │    - Position in output           │
+│          └──────────┘  │ ↓ │                                    │
+│                        └───┘                                    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      OUTPUT GRID                                 │
+│              (Single fullscreen output to video matrix)         │
+│                                                                  │
+│  ┌────────┬────────┬────────┐                                   │
+│  │   1    │   2    │   3    │  ← Active mapped cells            │
+│  │  ←→    │        │   ↑↓   │                                   │
+│  ├────────┼────────┼────────┤                                   │
+│  │ BLACK  │ BLACK  │ BLACK  │  ← Unmapped cells = black/no signal│
+│  ├────────┼────────┼────────┤                                   │
+│  │ BLACK  │ BLACK  │ BLACK  │                                   │
+│  └────────┴────────┴────────┘                                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+1. **Configurable Grid Dimensions**
+   - Grid size is configurable (e.g., 3×3, 2×2, 4×4)
+   - Already implemented - user can define N×M subdivision
+
+2. **Single Input per Output**
+   - Each grid cell in the output maps to ONE cell from the input grid
+   - Input source (Input 1 or Input 2) is selectable per output matrix
+   - Future: Could extend to multiple matrix outputs with independent inputs
+
+3. **Single Output Window**
+   - One fullscreen output window sends signal to HDMI video matrix
+   - Video matrix handles physical distribution to displays
+   - No per-display NDI outputs at this stage
+
+4. **AprilTag Auto-Detection**
+   - AprilTag markers on each physical display determine:
+     - **Aspect Ratio**: Detected from marker geometry (4:3, 16:9, etc.)
+     - **Orientation**: Detected from marker rotation (0°, 90°, 180°, 270°)
+   - If a display is rotated 90° CW, the top-left corner of the input region maps to the top-right of the output
+   - Eliminates manual aspect ratio/orientation configuration
+
+5. **Overlapping Support**
+   - Grid cells in the output CAN overlap (uncommon but supported)
+   - Pixel sampling from the input "stage" can have overlapping regions
+   - Physical displays unlikely to overlap in practice
+
+6. **No Edge Blending**
+   - No blending between adjacent mapped regions
+   - Clean cuts between displays
+
+### Data Structures
+
+```rust
+/// Configuration for the video matrix grid
+pub struct VideoMatrixConfig {
+    /// Grid dimensions (e.g., 3×3)
+    pub grid_rows: usize,
+    pub grid_cols: usize,
+    
+    /// Mapping from input grid cells to output displays
+    pub mappings: Vec<GridMapping>,
+    
+    /// Input source for this matrix (Input 1 or Input 2)
+    pub input_source: InputSelection,
+}
+
+/// A single mapping from input grid cell to output position
+pub struct GridMapping {
+    /// Input grid cell index (0 = top-left, row-major)
+    pub input_cell: usize,
+    
+    /// Output grid position (can be fractional for sub-grid precision)
+    pub output_position: GridPosition,
+    
+    /// Aspect ratio (auto-detected via AprilTag, or manual override)
+    pub aspect_ratio: AspectRatio,
+    
+    /// Orientation (auto-detected via AprilTag)
+    pub orientation: Orientation,
+    
+    /// Whether this mapping is active
+    pub enabled: bool,
+}
+
+pub enum AspectRatio {
+    Ratio4_3,
+    Ratio16_9,
+    Ratio16_10,
+    Custom { w: f32, h: f32 },
+}
+
+pub enum Orientation {
+    Normal,      // 0°
+    Rotated90,   // 90° CW
+    Rotated180,  // 180°
+    Rotated270,  // 270° CW (or 90° CCW)
+}
+
+/// Position in the output grid
+pub struct GridPosition {
+    pub row: f32,
+    pub col: f32,
+    pub width: f32,   // In grid cells
+    pub height: f32,  // In grid cells
+}
+```
+
+### Input Cell Selection UI
+
+```
+┌────────────────────────────────────┐
+│ Input Texture Grid (3×3)           │
+├────────────────────────────────────┤
+│                                    │
+│  ┌────┬────┬────┐                  │
+│  │  1 │  2 │  3 │  ← Click to     │
+│  ├────┼────┼────┤    select which │
+│  │  4 │  5 │  6 │    input cell   │
+│  ├────┼────┼────┤    maps to the  │
+│  │  7 │  8 │  9 │    active output│
+│  └────┴────┴────┘                  │
+│                                    │
+│ Selected: Cell 2 (center-top)      │
+│ Input Source: [Input 1 ▼]          │
+│                                    │
+└────────────────────────────────────┘
+```
+
+### Output Grid Configuration UI
+
+```
+┌────────────────────────────────────┐
+│ Output Grid Layout                 │
+├────────────────────────────────────┤
+│                                    │
+│  Grid Size: [3] × [3]  [Apply]     │
+│                                    │
+│  ┌────┬────┬────┐                  │
+│  │ 1  │ 2  │ 3  │  ← Numbers show  │
+│  │    │    │ ↑  │    which input   │
+│  ├────┼────┼────┤    cell maps     │
+│  │ -- │ -- │ -- │    here          │
+│  ├────┼────┼────┤  ← "--" = black  │
+│  │ -- │ -- │ -- │                  │
+│  └────┴────┴────┘                  │
+│                                    │
+│  [Auto-Detect with AprilTags]      │
+│  [Clear All] [Save Layout]         │
+│                                    │
+└────────────────────────────────────┘
+```
+
+### Mapping Flow
+
+1. **User configures grid size** (e.g., 3×3)
+2. **User places AprilTags** on physical displays
+3. **Auto-detect button clicked**:
+   - Camera sees all displays with AprilTags
+   - Detects position, aspect ratio, and orientation of each
+   - Suggests mappings based on spatial arrangement
+4. **User fine-tunes** which input cell maps to which output
+5. **Output renders** with input regions mapped accordingly
+6. **Unmapped cells** render as black
+
 ## Future Enhancements
 
 ### Interactive Mapping
@@ -546,6 +744,11 @@ If vertical space is limited:
 - Record preview to video file
 - Screenshot button
 
+### Multiple Matrix Outputs
+- Support for multiple independent video matrices
+- Each with its own input source and grid configuration
+- Useful for multi-room or complex installations
+
 ## Implementation Priority
 
 1. **Basic Layout** (Week 1)
@@ -563,7 +766,12 @@ If vertical space is limited:
    - Real-time updates
    - Zoom/pan
 
-4. **Polish** (Week 4)
-   - Status indicators
-   - Responsive behavior
-   - Visual enhancements
+4. **Grid Mapping UI** (Week 4)
+   - Input grid cell selector
+   - Output grid layout editor
+   - Black/unmapped cell handling
+
+5. **AprilTag Integration** (Week 5)
+   - Auto-detect aspect ratio
+   - Auto-detect orientation
+   - Spatial mapping suggestions

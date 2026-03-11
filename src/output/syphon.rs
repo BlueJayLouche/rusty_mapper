@@ -24,6 +24,10 @@ pub struct SyphonOutput {
     height: u32,
     /// Whether initialized
     initialized: bool,
+    /// wgpu device (stored for creating the Syphon server)
+    wgpu_device: Option<Arc<wgpu::Device>>,
+    /// wgpu queue (stored for creating the Syphon server)
+    wgpu_queue: Option<Arc<wgpu::Queue>>,
 }
 
 impl SyphonOutput {
@@ -48,6 +52,8 @@ impl SyphonOutput {
             width: 0,
             height: 0,
             initialized: false,
+            wgpu_device: Some(wgpu_device),
+            wgpu_queue: Some(wgpu_queue),
         })
     }
     
@@ -67,13 +73,29 @@ impl SyphonOutput {
         self.width = width;
         self.height = height;
         
-        // Note: We need to get access to the wgpu device and queue
-        // In the actual implementation, these would be stored or passed differently
-        // For now, we'll create the output when submit_frame is called
-        
-        log::info!("Syphon initialized: {}x{}", width, height);
-        self.initialized = true;
-        Ok(())
+        // Create the SyphonWgpuOutput using the stored device and queue
+        if let (Some(ref device), Some(ref queue)) = (&self.wgpu_device, &self.wgpu_queue) {
+            match SyphonWgpuOutput::new(&self.server_name, device, queue, width, height) {
+                Ok(output) => {
+                    if output.is_zero_copy() {
+                        log::info!("Syphon server '{}' created with zero-copy ({}x{})", 
+                            self.server_name, width, height);
+                    } else {
+                        log::info!("Syphon server '{}' created with CPU fallback ({}x{})", 
+                            self.server_name, width, height);
+                    }
+                    self.inner = Some(output);
+                    self.initialized = true;
+                    Ok(())
+                }
+                Err(e) => {
+                    log::error!("Failed to create Syphon server '{}': {}", self.server_name, e);
+                    Err(anyhow!("Failed to create Syphon output: {}", e))
+                }
+            }
+        } else {
+            Err(anyhow!("Syphon output not created - missing wgpu device or queue"))
+        }
     }
     
     /// Submit a wgpu texture to Syphon
@@ -89,12 +111,9 @@ impl SyphonOutput {
             self.initialize(texture.width(), texture.height())?;
         }
         
-        // Get or create the inner output
+        // Publish the frame
         if let Some(ref mut inner) = self.inner {
             inner.publish(texture, device, queue);
-        } else {
-            // Can't create without device access - log warning
-            log::warn!("Syphon output not fully initialized - missing wgpu device");
         }
         
         Ok(())
@@ -127,7 +146,9 @@ impl SyphonOutput {
     
     /// Shutdown and cleanup
     pub fn shutdown(&mut self) {
-        log::info!("Syphon server shutdown: {}", self.server_name);
+        if self.initialized || self.inner.is_some() {
+            log::info!("Syphon server shutdown: {}", self.server_name);
+        }
         self.inner = None;
         self.initialized = false;
         self.width = 0;

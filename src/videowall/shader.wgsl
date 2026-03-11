@@ -57,11 +57,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
     // Generate a fullscreen triangle that covers the entire viewport
     // vertex_index: 0 -> (-1, -1), 1 -> (3, -1), 2 -> (-1, 3)
     // This creates a large triangle that covers the screen
-    var pos = vec2<f32>(
-        f32(vertex_index % 2u) * 4.0 - 1.0,  // x: -1.0 or 3.0
-        f32(vertex_index / 2u) * 4.0 - 1.0   // y: -1.0 or 3.0
-    );
-    return vec4<f32>(pos, 0.0, 1.0);
+    // Use select to avoid integer division issues
+    let x = select(-1.0, 3.0, vertex_index == 1u);
+    let y = select(-1.0, 3.0, vertex_index == 2u);
+    return vec4<f32>(x, y, 0.0, 1.0);
 }
 
 // Fragment shader - sample appropriate display for each pixel

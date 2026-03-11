@@ -12,6 +12,43 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+/// Convert YUY2 (YUV 4:2:2) to RGBA
+/// Input: YUY2 format (4 bytes for 2 pixels)
+/// Output: RGBA format (4 bytes per pixel)
+fn yuy2_to_rgba(yuy2_data: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let pixel_count = (width * height) as usize;
+    let mut rgba = vec![0u8; pixel_count * 4];
+    
+    for i in 0..pixel_count {
+        let yuy2_idx = (i / 2) * 4;
+        if yuy2_idx + 3 >= yuy2_data.len() {
+            break;
+        }
+        
+        // YUY2 layout: [Y0, U, Y1, V]
+        let y = if i % 2 == 0 { yuy2_data[yuy2_idx] } else { yuy2_data[yuy2_idx + 2] };
+        let u = yuy2_data[yuy2_idx + 1];
+        let v = yuy2_data[yuy2_idx + 3];
+        
+        // Convert YUV to RGB
+        let y = y as f32;
+        let u = u as f32 - 128.0;
+        let v = v as f32 - 128.0;
+        
+        let r = (y + 1.402 * v).clamp(0.0, 255.0) as u8;
+        let g = (y - 0.344136 * u - 0.714136 * v).clamp(0.0, 255.0) as u8;
+        let b = (y + 1.772 * u).clamp(0.0, 255.0) as u8;
+        
+        let rgba_idx = i * 4;
+        rgba[rgba_idx] = r;
+        rgba[rgba_idx + 1] = g;
+        rgba[rgba_idx + 2] = b;
+        rgba[rgba_idx + 3] = 255; // Alpha
+    }
+    
+    rgba
+}
+
 /// A webcam video frame
 pub struct WebcamFrame {
     pub width: u32,
@@ -79,7 +116,13 @@ impl WebcamCapture {
                 return;
             }
             
-            log::info!("[Webcam] Camera {} opened", device_index);
+            // Get actual camera resolution after opening
+            let actual_resolution = camera.resolution();
+            let actual_width = actual_resolution.width() as u32;
+            let actual_height = actual_resolution.height() as u32;
+            
+            log::info!("[Webcam] Camera {} opened at {}x{}", 
+                device_index, actual_width, actual_height);
             
             // Capture loop
             loop {
@@ -91,11 +134,27 @@ impl WebcamCapture {
                 // Capture frame
                 match camera.frame() {
                     Ok(frame) => {
-                        let rgba_data = frame.buffer().to_vec();
+                        let buffer = frame.buffer();
+                        let expected_rgba_size = (actual_width * actual_height * 4) as usize;
                         
+                        // Convert to RGBA if needed
+                        let rgba_data = if buffer.len() == expected_rgba_size {
+                            // Already RGBA
+                            buffer.to_vec()
+                        } else if buffer.len() == (actual_width * actual_height * 2) as usize {
+                            // YUY2 format - convert to RGBA
+                            yuy2_to_rgba(buffer, actual_width, actual_height)
+                        } else {
+                            // Unknown format, try to use as-is (may cause visual issues)
+                            log::warn!("[Webcam] Unknown frame format: {} bytes for {}x{}", 
+                                buffer.len(), actual_width, actual_height);
+                            buffer.to_vec()
+                        };
+                        
+                        // Use actual camera resolution, not requested
                         let webcam_frame = WebcamFrame {
-                            width,
-                            height,
+                            width: actual_width,
+                            height: actual_height,
                             data: rgba_data,
                             timestamp: Instant::now(),
                         };

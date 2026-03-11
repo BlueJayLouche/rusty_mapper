@@ -13,7 +13,7 @@ use crate::engine::WgpuEngine;
 use crate::gui::{ControlGui, ImGuiRenderer};
 use crate::input::InputManager;
 use crate::ndi::NdiOutputSender;
-use crate::videowall::{CalibrationController, CalibrationStatus};
+use crate::videowall::{CalibrationController, CalibrationStatus, VideoMatrixConfig};
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -64,6 +64,12 @@ struct App {
     
     // Modifier state
     shift_pressed: bool,
+    
+    // Track last uploaded matrix pattern to avoid re-uploading
+    last_matrix_pattern: Option<(u32, u32)>, // (width, height)
+    
+    // Cache last video matrix config to avoid redundant updates
+    last_video_matrix_config: Option<VideoMatrixConfig>,
 }
 
 impl App {
@@ -83,6 +89,8 @@ impl App {
             input_manager: None,
             ndi_output: None,
             shift_pressed: false,
+            last_matrix_pattern: None,
+            last_video_matrix_config: None,
         }
     }
     
@@ -153,6 +161,20 @@ impl App {
                     }
                 }
             }
+            #[cfg(target_os = "macos")]
+            InputChangeRequest::StartSyphon { server_name } => {
+                log::info!("Starting Syphon on input 1: {}", server_name);
+                if let Some(ref mut manager) = self.input_manager {
+                    match manager.start_input1_syphon(&server_name) {
+                        Ok(_) => {
+                            let mut state = self.shared_state.lock().unwrap();
+                            state.ndi_input1.is_active = true;
+                            state.ndi_input1.source_name = server_name;
+                        }
+                        Err(e) => log::error!("Failed to start Syphon: {:?}", e),
+                    }
+                }
+            }
             InputChangeRequest::StopInput => {
                 if let Some(ref mut manager) = self.input_manager {
                     manager.stop_input1();
@@ -207,6 +229,20 @@ impl App {
                             state.ndi_input2.source_name = source_name;
                         }
                         Err(e) => log::error!("Failed to start OBS: {:?}", e),
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            InputChangeRequest::StartSyphon { server_name } => {
+                log::info!("Starting Syphon on input 2: {}", server_name);
+                if let Some(ref mut manager) = self.input_manager {
+                    match manager.start_input2_syphon(&server_name) {
+                        Ok(_) => {
+                            let mut state = self.shared_state.lock().unwrap();
+                            state.ndi_input2.is_active = true;
+                            state.ndi_input2.source_name = server_name;
+                        }
+                        Err(e) => log::error!("Failed to start Syphon: {:?}", e),
                     }
                 }
             }
@@ -272,41 +308,127 @@ impl App {
                     .unwrap_or(false)
             };
             
-            // Upload input 1 frame if available
-            if manager.input1.has_frame() {
-                if let Some(frame_data) = manager.input1.take_frame() {
-                    let (width, height) = manager.input1.resolution();
-                    
-                    // If calibration is waiting, submit this frame
-                    if calibration_waiting {
-                        let mut state = self.shared_state.lock().unwrap();
-                        if let Some(ref mut calibration) = state.videowall_calibration {
-                            log::info!("Auto-submitting camera frame {}x{} for calibration", width, height);
-                            calibration.submit_frame(frame_data.clone(), width, height);
+            // Check if we're showing matrix test pattern (skip normal input)
+            let showing_matrix_pattern = {
+                let state = self.shared_state.lock().unwrap();
+                state.matrix_showing_test_pattern
+            };
+            
+            // Upload input 1 frame if available (unless showing test pattern)
+            if manager.input1.has_frame() && !showing_matrix_pattern {
+                // Check if this is Syphon input (zero-copy texture path)
+                #[cfg(target_os = "macos")]
+                if manager.input1.input_type() == crate::input::InputType::Syphon {
+                    // Use zero-copy texture path for Syphon
+                    if let Some(texture) = manager.input1.take_syphon_texture() {
+                        let width = texture.width();
+                        let height = texture.height();
+                        
+                        if let Some(ref mut engine) = self.output_engine {
+                            // GPU-to-GPU copy (zero CPU involvement)
+                            engine.input_texture_manager.update_input1_from_texture(&texture);
                         }
+                        
+                        // Update shared state
+                        let mut state = self.shared_state.lock().unwrap();
+                        state.ndi_input1.width = width;
+                        state.ndi_input1.height = height;
                     }
-                    
-                    if let Some(ref mut engine) = self.output_engine {
-                        engine.input_texture_manager.update_input1(&frame_data, width, height);
+                } else {
+                    // CPU fallback path for NDI/Webcam
+                    if let Some(frame_data) = manager.input1.take_frame() {
+                        let (width, height) = manager.input1.resolution();
+                        
+                        // If calibration is waiting, submit this frame
+                        if calibration_waiting {
+                            let mut state = self.shared_state.lock().unwrap();
+                            if let Some(ref mut calibration) = state.videowall_calibration {
+                                log::info!("Auto-submitting camera frame {}x{} for calibration", width, height);
+                                calibration.submit_frame(frame_data.clone(), width, height);
+                            }
+                        }
+                        
+                        if let Some(ref mut engine) = self.output_engine {
+                            engine.input_texture_manager.update_input1(&frame_data, width, height);
+                        }
+                        // Update shared state
+                        let mut state = self.shared_state.lock().unwrap();
+                        state.ndi_input1.width = width;
+                        state.ndi_input1.height = height;
                     }
-                    // Update shared state
-                    let mut state = self.shared_state.lock().unwrap();
-                    state.ndi_input1.width = width;
-                    state.ndi_input1.height = height;
+                }
+                
+                #[cfg(not(target_os = "macos"))]
+                {
+                    // Non-macOS: use CPU path only
+                    if let Some(frame_data) = manager.input1.take_frame() {
+                        let (width, height) = manager.input1.resolution();
+                        
+                        if calibration_waiting {
+                            let mut state = self.shared_state.lock().unwrap();
+                            if let Some(ref mut calibration) = state.videowall_calibration {
+                                log::info!("Auto-submitting camera frame {}x{} for calibration", width, height);
+                                calibration.submit_frame(frame_data.clone(), width, height);
+                            }
+                        }
+                        
+                        if let Some(ref mut engine) = self.output_engine {
+                            engine.input_texture_manager.update_input1(&frame_data, width, height);
+                        }
+                        let mut state = self.shared_state.lock().unwrap();
+                        state.ndi_input1.width = width;
+                        state.ndi_input1.height = height;
+                    }
+                }
+            } else if showing_matrix_pattern {
+                // Discard frame without processing when showing test pattern
+                if manager.input1.has_frame() {
+                    let _ = manager.input1.take_frame();
+                    #[cfg(target_os = "macos")]
+                    let _ = manager.input1.take_syphon_texture();
                 }
             }
             
             // Upload input 2 frame if available
             if manager.input2.has_frame() {
-                if let Some(frame_data) = manager.input2.take_frame() {
-                    let (width, height) = manager.input2.resolution();
-                    if let Some(ref mut engine) = self.output_engine {
-                        engine.input_texture_manager.update_input2(&frame_data, width, height);
+                // Check if this is Syphon input (zero-copy texture path)
+                #[cfg(target_os = "macos")]
+                if manager.input2.input_type() == crate::input::InputType::Syphon {
+                    if let Some(texture) = manager.input2.take_syphon_texture() {
+                        let width = texture.width();
+                        let height = texture.height();
+                        
+                        if let Some(ref mut engine) = self.output_engine {
+                            engine.input_texture_manager.update_input2_from_texture(&texture);
+                        }
+                        
+                        let mut state = self.shared_state.lock().unwrap();
+                        state.ndi_input2.width = width;
+                        state.ndi_input2.height = height;
                     }
-                    // Update shared state
-                    let mut state = self.shared_state.lock().unwrap();
-                    state.ndi_input2.width = width;
-                    state.ndi_input2.height = height;
+                } else {
+                    if let Some(frame_data) = manager.input2.take_frame() {
+                        let (width, height) = manager.input2.resolution();
+                        if let Some(ref mut engine) = self.output_engine {
+                            engine.input_texture_manager.update_input2(&frame_data, width, height);
+                        }
+                        let mut state = self.shared_state.lock().unwrap();
+                        state.ndi_input2.width = width;
+                        state.ndi_input2.height = height;
+                    }
+                }
+                
+                #[cfg(not(target_os = "macos"))]
+                {
+                    if let Some(frame_data) = manager.input2.take_frame() {
+                        let (width, height) = manager.input2.resolution();
+                        if let Some(ref mut engine) = self.output_engine {
+                            engine.input_texture_manager.update_input2(&frame_data, width, height);
+                        }
+                        let mut state = self.shared_state.lock().unwrap();
+                        state.ndi_input2.width = width;
+                        state.ndi_input2.height = height;
+                    }
                 }
             }
         }
@@ -361,6 +483,143 @@ impl App {
             if let Some(ref calibration) = state.videowall_calibration {
                 if !calibration.is_active() {
                     state.videowall_calibration = None;
+                }
+            }
+        }
+        
+        // Process matrix test pattern (AprilTag pattern display)
+        self.process_matrix_test_pattern();
+    }
+    
+    /// Process matrix test pattern display
+    fn process_matrix_test_pattern(&mut self) {
+        let pattern_to_display = {
+            let state = self.shared_state.lock().unwrap();
+            state.matrix_test_pattern.clone()
+        };
+        
+        if let Some((rgba_data, width, height)) = pattern_to_display {
+            // Only upload if pattern dimensions changed (avoid re-uploading same pattern)
+            let should_upload = self.last_matrix_pattern != Some((width, height));
+            
+            if should_upload {
+                if let Some(ref mut engine) = self.output_engine {
+                    // Upload pattern to output for display
+                    if let Err(e) = engine.upload_test_pattern(&rgba_data, width, height) {
+                        log::error!("Failed to upload matrix test pattern: {}", e);
+                    } else {
+                        self.last_matrix_pattern = Some((width, height));
+                        log::info!("Uploaded matrix test pattern: {}x{}", width, height);
+                    }
+                }
+            }
+        } else {
+            // Pattern cleared
+            self.last_matrix_pattern = None;
+        }
+    }
+    
+    /// Sync video wall state from shared state to engine
+    fn sync_video_wall_state(&mut self) {
+        let (enabled, config) = {
+            let state = self.shared_state.lock().unwrap();
+            (state.videowall_enabled, state.videowall_config.clone())
+        };
+        
+        if let Some(ref mut engine) = self.output_engine {
+            // Enable/disable video wall rendering
+            engine.set_video_wall_enabled(enabled);
+            
+            // Update config if available
+            if enabled {
+                if let Some(ref cfg) = config {
+                    engine.update_video_wall_config(cfg);
+                }
+            }
+        }
+    }
+    
+    /// Sync video matrix state from shared state to engine
+    fn sync_video_matrix_state(&mut self) {
+        let (enabled, config) = {
+            let state = self.shared_state.lock().unwrap();
+            (state.video_matrix_enabled, state.video_matrix_config.clone())
+        };
+        
+        let mapping_count = config.input_grid.mappings.len();
+        
+        if let Some(ref mut engine) = self.output_engine {
+            // Enable/disable video matrix rendering
+            let was_enabled = engine.is_video_matrix_enabled();
+            engine.set_video_matrix_enabled(enabled);
+            
+            // Check if config changed
+            let config_changed = self.last_video_matrix_config.as_ref() != Some(&config);
+            
+            // Update config if enabled and changed
+            if enabled && config_changed {
+                log::info!("Video matrix config updated: {} mappings", mapping_count);
+                engine.update_video_matrix_config(&config);
+                self.last_video_matrix_config = Some(config);
+            }
+            
+            // Log state change
+            if enabled != was_enabled {
+                log::info!("Video matrix {} ({} mappings)", 
+                    if enabled { "ENABLED" } else { "DISABLED" },
+                    mapping_count);
+            }
+        }
+    }
+    
+    /// Update preview textures for GUI display
+    /// Copies input and output textures to ImGui preview textures
+    fn update_preview_textures(&mut self) {
+        // Need both renderer and output engine
+        let (input_tex, output_tex) = {
+            if let Some(ref engine) = self.output_engine {
+                // Get input texture from texture manager
+                let input = engine.input_texture_manager().input1.as_ref()
+                    .map(|t| &t.texture);
+                
+                // Get output texture (video matrix or render target)
+                let output = if engine.is_video_matrix_enabled() {
+                    engine.video_matrix_output_texture()
+                        .map(|t| &t.texture)
+                        .or_else(|| Some(&engine.render_target().texture))
+                } else {
+                    Some(&engine.render_target().texture)
+                };
+                
+                (input, output)
+            } else {
+                (None, None)
+            }
+        };
+        
+        // Update preview textures via ImGui renderer
+        if let Some(ref mut renderer) = self.imgui_renderer {
+            if let (Some(input), Some(gui)) = (input_tex, self.control_gui.as_ref()) {
+                if let Some(preview_id) = gui.input_preview_texture_id {
+                    // Create command encoder for copy
+                    let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Preview Update Encoder"),
+                    });
+                    
+                    renderer.update_preview_texture(preview_id, input, &mut encoder);
+                    renderer.queue().submit(std::iter::once(encoder.finish()));
+                }
+            }
+            
+            if let (Some(output), Some(gui)) = (output_tex, self.control_gui.as_ref()) {
+                if let Some(preview_id) = gui.output_preview_texture_id {
+                    // Create command encoder for copy
+                    let mut encoder = renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Preview Update Encoder"),
+                    });
+                    
+                    renderer.update_preview_texture(preview_id, output, &mut encoder);
+                    renderer.queue().submit(std::iter::once(encoder.finish()));
                 }
             }
         }
@@ -452,9 +711,22 @@ impl ApplicationHandler for App {
                     window,
                     1.0,
                 )) {
-                    Ok(renderer) => {
+                    Ok(mut renderer) => {
                         match ControlGui::new(&self.config, Arc::clone(&self.shared_state)) {
-                            Ok(gui) => {
+                            Ok(mut gui) => {
+                                // Create preview textures for input and output
+                                // Use full resolution so the entire texture is visible
+                                let internal_width = self.config.resolution.internal_width;
+                                let internal_height = self.config.resolution.internal_height;
+                                let input_preview_id = renderer.create_preview_texture(internal_width, internal_height);
+                                let output_preview_id = renderer.create_preview_texture(internal_width, internal_height);
+                                
+                                gui.set_input_preview_texture(input_preview_id);
+                                gui.set_output_preview_texture(output_preview_id);
+                                
+                                log::info!("Created preview textures: input={:?}, output={:?} ({}x{})", 
+                                    input_preview_id, output_preview_id, internal_width, internal_height);
+                                
                                 self.control_gui = Some(gui);
                                 self.imgui_renderer = Some(renderer);
                             }
@@ -522,6 +794,9 @@ impl ApplicationHandler for App {
                     WindowEvent::RedrawRequested => {
                         if let Some(ref mut engine) = self.output_engine {
                             engine.render();
+                            
+                            // Update preview textures after rendering
+                            self.update_preview_textures();
                         }
                     }
                     // Mouse handling for corner adjustment
@@ -613,8 +888,17 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         // Initialize input manager if needed (after engine is ready)
         if self.input_manager.is_none() {
-            self.input_manager = Some(InputManager::new());
-            log::info!("InputManager initialized");
+            let mut manager = InputManager::new();
+            
+            // Initialize with wgpu device/queue for Syphon support
+            if let (Some(ref device), Some(ref queue)) = (&self.wgpu_device, &self.wgpu_queue) {
+                manager.initialize(device, queue);
+                log::info!("InputManager initialized with wgpu resources");
+            } else {
+                log::warn!("InputManager initialized without wgpu resources - Syphon will not be available");
+            }
+            
+            self.input_manager = Some(manager);
         }
         
         // Process input change requests
@@ -625,6 +909,12 @@ impl ApplicationHandler for App {
         
         // Update video wall calibration
         self.process_videowall_calibration();
+        
+        // Sync video wall state to engine
+        self.sync_video_wall_state();
+        
+        // Sync video matrix state to engine
+        self.sync_video_matrix_state();
         
         // Update inputs and upload frames to GPU
         self.update_inputs();

@@ -33,7 +33,12 @@ use core::SharedState;
 ///
 /// Creates the event loop and initializes both windows.
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    // Initialize logging with filters to reduce noise from wgpu/naga
+    env_logger::Builder::from_default_env()
+        .filter_module("wgpu_hal::metal", log::LevelFilter::Warn)
+        .filter_module("naga", log::LevelFilter::Warn)
+        .filter_module("wgpu_core", log::LevelFilter::Warn)
+        .init();
     
     info!("Starting Rusty Mapper v{}", env!("CARGO_PKG_VERSION"));
     

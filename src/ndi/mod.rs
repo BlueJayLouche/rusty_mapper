@@ -11,7 +11,7 @@
 //! 
 //! ### Output (`NdiOutputSender`)
 //! - Dedicated sender thread to avoid blocking render loop
-//! - Receives RGBA frames, converts to BGRA/BGRX for NDI
+//! - Receives BGRA frames (native format, no conversion needed)
 //! - Bounded channel (capacity=2) for low latency
 
 pub mod output;

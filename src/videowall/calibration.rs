@@ -1,7 +1,7 @@
 //! # Video Wall Calibration Controller
 //!
 //! Manages the calibration workflow for video wall auto-calibration using
-//! static ArUco patterns. Supports both real-time camera capture and
+//! static AprilTag patterns. Supports both real-time camera capture and
 //! photo/video upload modes.
 //!
 //! ## Static Pattern Calibration Flow
@@ -13,7 +13,7 @@
 //!                              (single frame)
 //! ```
 //!
-//! All displays show their unique ArUco markers simultaneously. A single
+//! All displays show their unique AprilTag markers simultaneously. A single
 //! camera frame captures all markers at once, enabling faster calibration
 //! and support for photo-based processing.
 //!
@@ -41,7 +41,7 @@
 //! }
 //! ```
 
-use super::{ArUcoGenerator, ArUcoDictionary, DetectedMarker, DisplayQuad, GridSize, VideoWallConfig, CalibrationInfo, QuadMapper, QuadMapConfig};
+use super::{AprilTagGenerator, AprilTagFamily, DisplayQuad, GridSize, VideoWallConfig, CalibrationInfo, QuadMapper, QuadMapConfig};
 use std::path::Path;
 use std::time::Instant;
 
@@ -118,7 +118,7 @@ impl std::fmt::Display for CalibrationError {
             Self::CameraError(e) => write!(f, "Camera error: {}", e),
             Self::DecodeError(e) => write!(f, "Decode error: {}", e),
             Self::DetectionError(e) => write!(f, "Detection error: {}", e),
-            Self::NoMarkersDetected => write!(f, "No ArUco markers detected in frame"),
+            Self::NoMarkersDetected => write!(f, "No AprilTags detected in frame"),
             Self::MissingDisplays { expected, found } => {
                 write!(f, "Missing displays: expected {}, found {}", expected, found)
             }
@@ -166,8 +166,10 @@ pub struct CapturedFrame {
 pub struct DisplayDetection {
     /// Display ID this detection is for
     pub display_id: u32,
-    /// Detected marker
-    pub marker: Option<DetectedMarker>,
+    /// Corner positions in image coordinates [top-left, top-right, bottom-right, bottom-left]
+    pub corners: [[f32; 2]; 4],
+    /// Detection confidence (0-1)
+    pub confidence: f32,
     /// Frame dimensions when detected
     pub frame_width: u32,
     pub frame_height: u32,
@@ -224,8 +226,8 @@ pub struct CalibrationController {
     timing: CalibrationTiming,
     /// Marker display configuration
     marker_config: MarkerDisplayConfig,
-    /// ArUco generator
-    generator: ArUcoGenerator,
+    /// AprilTag generator
+    generator: AprilTagGenerator,
     /// Generated pattern showing all markers
     all_patterns_frame: Option<image::RgbaImage>,
     /// Captured frame
@@ -250,7 +252,7 @@ impl CalibrationController {
             auto_detect: false,
             timing: CalibrationTiming::default(),
             marker_config: MarkerDisplayConfig::default(),
-            generator: ArUcoGenerator::new(ArUcoDictionary::default()),
+            generator: AprilTagGenerator::new(AprilTagFamily::default()),
             all_patterns_frame: None,
             captured_frame: None,
             detections: Vec::new(),
@@ -286,9 +288,9 @@ impl CalibrationController {
     ) -> anyhow::Result<()> {
         let total_displays = grid_size.total_displays();
         
-        // Select appropriate dictionary
-        let dictionary = ArUcoDictionary::for_grid_size(grid_size.columns, grid_size.rows);
-        self.generator = ArUcoGenerator::new(dictionary);
+        // Select appropriate AprilTag family
+        let family = AprilTagFamily::for_grid_size(grid_size.columns, grid_size.rows);
+        self.generator = AprilTagGenerator::new(family);
         
         // Generate single frame with all markers
         self.all_patterns_frame = Some(self.generator.generate_all_markers_frame(
@@ -307,9 +309,9 @@ impl CalibrationController {
         self.calibration_start = Some(Instant::now());
         
         log::info!(
-            "Starting real-time calibration: {} displays, {:?} dictionary, {}% marker size",
+            "Starting real-time calibration: {} displays, {} family, {}% marker size",
             total_displays,
-            dictionary,
+            family.name(),
             (self.marker_config.marker_size_percent * 100.0) as u32
         );
         
@@ -329,9 +331,9 @@ impl CalibrationController {
         
         let total_displays = grid_size.total_displays();
         
-        // Select appropriate dictionary
-        let dictionary = ArUcoDictionary::for_grid_size(grid_size.columns, grid_size.rows);
-        self.generator = ArUcoGenerator::new(dictionary);
+        // Select appropriate AprilTag family
+        let family = AprilTagFamily::for_grid_size(grid_size.columns, grid_size.rows);
+        self.generator = AprilTagGenerator::new(family);
         
         // Generate reference patterns (for display during setup)
         self.all_patterns_frame = Some(self.generator.generate_all_markers_frame(
@@ -340,19 +342,33 @@ impl CalibrationController {
             self.marker_config.marker_size_percent,
         )?);
         
+        // Load the image file immediately
+        let img = image::open(image_path)
+            .map_err(|e| CalibrationError::DecodeError(format!("Failed to load image: {}", e)))?;
+        let rgba = img.to_rgba8();
+        
+        self.captured_frame = Some(CapturedFrame {
+            data: rgba.to_vec(),
+            width: rgba.width(),
+            height: rgba.height(),
+            timestamp: Instant::now(),
+        });
+        
         self.grid_size = grid_size;
         self.mode = CalibrationMode::Photo {
             image_path: image_path.to_path_buf(),
         };
-        self.phase = CalibrationPhase::Processing { current: 0, total: 1 };
-        self.captured_frame = None;
+        // Start at step 1 since we already have the frame loaded
+        self.phase = CalibrationPhase::Processing { current: 1, total: 2 };
         self.detections.clear();
         self.calibration_start = Some(Instant::now());
         
         log::info!(
-            "Starting photo calibration: {} displays from {:?}",
+            "Starting photo calibration: {} displays from {:?} ({}x{})",
             total_displays,
-            image_path
+            image_path,
+            rgba.width(),
+            rgba.height()
         );
         
         Ok(())
@@ -533,58 +549,59 @@ impl CalibrationController {
         let image = image::RgbaImage::from_raw(frame.width, frame.height, frame.data.clone())
             .ok_or(CalibrationError::DecodeError("Invalid frame data".to_string()))?;
         
-        // Detect all markers in the frame
-        let detector = super::ArUcoDetector::new(self.generator.dictionary());
+        // Convert to grayscale for detection
+        let gray_image = image::DynamicImage::ImageRgba8(image).to_luma8();
         
-        #[cfg(feature = "opencv")]
-        {
-            // Convert to OpenCV Mat for detection
-            let mat = Self::image_to_mat(&image)
-                .map_err(|e| CalibrationError::DetectionError(e.to_string()))?;
-            
-            let markers = detector.detect_markers(&mat)
-                .map_err(|e| CalibrationError::DetectionError(e.to_string()))?;
-            
-            if markers.is_empty() {
-                return Err(CalibrationError::NoMarkersDetected);
-            }
-            
-            // Create detections for all found markers
-            for marker in markers {
-                self.detections.push(DisplayDetection {
-                    display_id: marker.id,
-                    marker: Some(marker),
-                    frame_width: frame.width,
-                    frame_height: frame.height,
-                });
-            }
+        // Detect markers using AprilTag (pure Rust, no OpenCV needed)
+        let mut detector = super::AprilTagDetector::new(super::AprilTagFamily::Tag36h11);
+        let detections = detector.detect(&gray_image);
+        
+        if detections.is_empty() {
+            log::warn!("No AprilTags detected in the image");
+            log::warn!("Make sure you're using AprilTag markers (tag36h11 family)");
+            return Err(CalibrationError::NoMarkersDetected);
         }
         
-        #[cfg(not(feature = "opencv"))]
-        {
-            // Fallback: can't detect without OpenCV
-            return Err(CalibrationError::DetectionError(
-                "OpenCV feature required for marker detection".to_string()
-            ));
+        // Create detections for all found markers
+        for det in detections {
+            self.detections.push(DisplayDetection {
+                display_id: det.id,
+                corners: det.corners,
+                confidence: det.decision_margin / 100.0, // Normalize decision margin to 0-1
+                frame_width: frame.width,
+                frame_height: frame.height,
+            });
         }
         
         log::info!("Detected {} markers in frame", self.detections.len());
         Ok(())
     }
 
-    /// Convert image::RgbaImage to OpenCV Mat
+    /// Convert image::RgbaImage to OpenCV Mat (grayscale for ArUco detection)
     #[cfg(feature = "opencv")]
     fn image_to_mat(image: &image::RgbaImage) -> anyhow::Result<opencv::core::Mat> {
-        use opencv::core::{Mat, CV_8UC4};
+        use opencv::core::{Mat, CV_8UC1, CV_8UC4};
+        use opencv::prelude::*;
+        use opencv::imgproc;
         
         let width = image.width() as i32;
         let height = image.height() as i32;
         let data = image.as_raw();
         
+        // Create RGBA Mat from raw bytes
         let mat = Mat::from_slice(data)?;
-        let mat = mat.reshape(4, height)?;
+        let rgba_mat = mat.reshape(4, height)?;
         
-        Ok(mat)
+        // Clone to get an owned Mat
+        let mut owned_rgba = Mat::default();
+        rgba_mat.copy_to(&mut owned_rgba)?;
+        
+        // Convert to grayscale - ArUco detection works better on grayscale
+        let mut gray_mat = Mat::default();
+        imgproc::cvt_color(&owned_rgba, &mut gray_mat, imgproc::COLOR_RGBA2GRAY, 0, opencv::core::AlgorithmHint::ALGO_HINT_DEFAULT)?;
+        
+        log::debug!("Converted image to grayscale: {}x{}", width, height);
+        Ok(gray_mat)
     }
 
     /// Build quad map from detections
@@ -670,14 +687,9 @@ impl CalibrationController {
         let avg_confidence = if !self.detections.is_empty() {
             let total_confidence: f32 = self.detections
                 .iter()
-                .filter_map(|d| d.marker.as_ref().map(|m| m.confidence))
+                .map(|d| d.confidence)
                 .sum();
-            let valid_count = self.detections.iter().filter(|d| d.marker.is_some()).count() as f32;
-            if valid_count > 0.0 {
-                total_confidence / valid_count
-            } else {
-                0.0
-            }
+            total_confidence / self.detections.len() as f32
         } else {
             0.0
         };
@@ -686,7 +698,7 @@ impl CalibrationController {
             date: chrono::Utc::now().to_rfc3339(),
             camera_source,
             camera_resolution,
-            marker_dictionary: format!("{:?}", self.generator.dictionary()),
+            marker_dictionary: self.generator.family().name().to_string(),
             avg_detection_confidence: avg_confidence,
             calibration_duration_secs: duration,
         };
@@ -854,6 +866,6 @@ mod tests {
 
         let error2 = CalibrationError::NoMarkersDetected;
         let msg2 = format!("{}", error2);
-        assert!(msg2.contains("No ArUco markers"));
+        assert!(msg2.contains("No AprilTags"));
     }
 }
