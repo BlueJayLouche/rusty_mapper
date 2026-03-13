@@ -29,7 +29,8 @@ pub use syphon_input::{SyphonInputReceiver, SyphonDiscovery, SyphonInputIntegrat
 
 // Re-export syphon-wgpu types for convenience
 #[cfg(target_os = "macos")]
-pub use syphon_wgpu::{SyphonWgpuInput, InputFormat as SyphonInputFormat};
+pub use syphon_wgpu::SyphonWgpuInput;
+// Note: InputFormat was removed in syphon-wgpu 0.3.0 - BGRA is now the only format
 
 // Placeholder types when webcam is disabled
 #[cfg(not(feature = "webcam"))]

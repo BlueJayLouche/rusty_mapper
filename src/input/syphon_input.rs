@@ -9,8 +9,7 @@ use std::sync::Arc;
 /// Re-export from syphon-core
 pub use syphon_core::ServerInfo as SyphonServerInfo;
 
-/// Re-export input format from syphon-wgpu
-pub use syphon_wgpu::InputFormat as SyphonFormat;
+// Note: syphon-wgpu 0.3.0+ uses native BGRA format only, no format configuration needed
 
 /// A received Syphon frame (BGRA pixel data for CPU fallback)
 pub struct SyphonFrame {
@@ -75,8 +74,7 @@ impl SyphonInputReceiver {
                 .ok_or_else(|| anyhow::anyhow!("SyphonInputReceiver not initialized with device/queue"))?;
             
             let mut client = syphon_wgpu::SyphonWgpuInput::new(device, queue);
-            // Use native BGRA for zero-copy (no pixel format conversion)
-            client.set_format(SyphonFormat::Bgra);
+            // Note: syphon-wgpu 0.3.0+ uses native BGRA format automatically
             client.connect(&server_name)
                 .map_err(|e| anyhow::anyhow!("Failed to connect: {:?}", e))?;
             
